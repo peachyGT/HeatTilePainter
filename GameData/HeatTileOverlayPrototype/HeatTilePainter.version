@@ -1,0 +1,21 @@
+{
+  "NAME": "Heat Tile Painter",
+  "URL": "https://raw.githubusercontent.com/peachyGT/HeatTilePainter/main/GameData/HeatTileOverlayPrototype/HeatTilePainter.version",
+  "DOWNLOAD": "https://github.com/peachyGT/HeatTilePainter/releases/latest",
+  "GITHUB": {
+    "USERNAME": "peachyGT",
+    "REPOSITORY": "HeatTilePainter",
+    "ALLOW_PRE_RELEASE": false
+  },
+  "VERSION": {
+    "MAJOR": 0,
+    "MINOR": 24,
+    "PATCH": 1,
+    "BUILD": 0
+  },
+  "KSP_VERSION": {
+    "MAJOR": 1,
+    "MINOR": 12,
+    "PATCH": 5
+  }
+}

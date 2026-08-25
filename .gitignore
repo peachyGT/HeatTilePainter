@@ -1,0 +1,22 @@
+# Local release output
+/dist/
+/release/HeatTilePainter.netkan.submission
+
+# Machine-specific development helpers and evidence
+/install-after-ksp-exit.ps1
+/Tools/Dump-ReforgedIL.ps1
+/Tools/make_hrsi_texture.py
+/Tools/Sources/
+/.kiro/
+/AGENTS.md
+
+# Local/generated previews not used by the public documentation
+/*_preview.png
+
+# Editor and OS noise
+.vs/
+.idea/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
