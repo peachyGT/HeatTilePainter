@@ -58,11 +58,12 @@ if ($forum -notmatch 'about 70% vibe-coded' -or
     $forum -match '(?i)author description|placeholder|add the main mod description') {
     throw 'The forum draft is incomplete or omits peachyG''s development acknowledgement.'
 }
+$expectedForumHomepage = 'https://forum.kerbalspaceprogram.com/topic/231652-1125-heat-tile-painter-0241-very-simple-way-to-add-heat-shielding-to-sstosspaceplanes/'
 if ($netkan -notmatch 'find: HeatTileOverlayPrototype' -or
     $netkan -notmatch 'name: ModuleManager' -or
     $netkan -notmatch '#/ckan/github/peachyGT/HeatTilePainter/' -or
-    $netkan -match '(?m)^\s*homepage:') {
-    throw 'NetKAN install/dependency gate failed, or a forum homepage was added before publication.'
+    $netkan -notmatch ('(?m)^\s*homepage:\s*' + [regex]::Escape($expectedForumHomepage) + '\s*$')) {
+    throw 'NetKAN install, dependency, source, or forum-homepage gate failed.'
 }
 
 $screenshots = @{

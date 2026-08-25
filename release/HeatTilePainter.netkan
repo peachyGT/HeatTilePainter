@@ -12,6 +12,7 @@ x_netkan_version_edit:
   strict: true
 release_status: stable
 resources:
+  homepage: https://forum.kerbalspaceprogram.com/topic/231652-1125-heat-tile-painter-0241-very-simple-way-to-add-heat-shielding-to-sstosspaceplanes/
   repository: https://github.com/peachyGT/HeatTilePainter
   bugtracker: https://github.com/peachyGT/HeatTilePainter/issues
 tags:
