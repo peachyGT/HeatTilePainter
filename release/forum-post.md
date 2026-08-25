@@ -2,18 +2,15 @@ Forum title: `[1.12.5] Heat Tile Painter 0.24.1`
 
 Forum post:
 
-I wanted a way to paint heat tiles onto the parts I was already using, without covering a craft in
+I wanted a way to paint heat tiles onto the parts I was already using, without covering a craft in tens of
 decal parts or losing a large chunk of the frame rate. Heat Tile Painter is where that ended up.
 
-It runs in the VAB and SPH. You can paint four heat-tile patterns or a flat color onto a chosen side
+It runs in the VAB and SPH. You can paint four heat-tile textures or a flat color onto a chosen side
 of a part, stack several layers, move or rotate them with KSP-style gizmos, and adjust the coverage,
 edge, surface wrap, mirror, and layer order. Paint stays with the craft through save and load,
 launch, and revert.
 
-This was about 90% vibe-coded. I directed it and did the in-game testing, which involved a lot of
-broken procedural parts, editor-to-flight mismatches, paint appearing on both sides, and a few
-builds that ran at less than 1 FPS. Version 0.24.1 is the first build I am comfortable putting out
-for normal use.
+This was about 70% vibe-coded. This did take a lot of iteration and manual rewriting, but overall it's a pretty light and simple project that didn't take too much effort.
 
 ![Heat Tile Painter flight topside](https://raw.githubusercontent.com/peachyGT/HeatTilePainter/main/docs/screenshots/flight-topside.png)
 
@@ -25,9 +22,9 @@ for normal use.
 
 ## Download and source
 
-- Download: https://github.com/peachyGT/HeatTilePainter/releases/latest
-- Source and issue tracker: https://github.com/peachyGT/HeatTilePainter
-- CKAN: submission will follow once this support thread is live
+- Download: [https://github.com/peachyGT/HeatTilePainter/releases/latest](https://github.com/peachyGT/HeatTilePainter/releases/latest)
+- Source and issue tracker: [https://github.com/peachyGT/HeatTilePainter](https://github.com/peachyGT/HeatTilePainter)
+- CKAN: submitting now
 
 ## Requirements
 
@@ -41,7 +38,6 @@ Technicolor, and Conformal Decals are also not required.
 
 Copy the downloaded archive's `GameData` folder into the Kerbal Space Program folder and merge it
 with the existing `GameData` folder. The installed path is `GameData/HeatTileOverlayPrototype`.
-The older folder name is kept for saved-craft compatibility.
 
 ## Use
 
@@ -76,5 +72,5 @@ redistributed. The download and source repository contain the full notices.
 
 ## Bug reports
 
-Please include `KSP.log`, the craft file when it matters, KSP and ModuleManager versions, steps to
+Please include `KSP.log`, the craft file when you can, KSP and ModuleManager versions, steps to
 reproduce the problem, and a list of installed visual or editor mods.

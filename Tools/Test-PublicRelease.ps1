@@ -54,7 +54,7 @@ if ($thirdParty -notmatch 'Reforged Materials Redux' -or $thirdParty -notmatch '
 if ($assetLicense -notmatch 'B9-PWings-Modified' -or $assetLicense -notmatch 'Copyright \(c\) 2015') {
     throw 'B9 asset attribution is incomplete.'
 }
-if ($forum -notmatch 'about 90% vibe-coded' -or
+if ($forum -notmatch 'about 70% vibe-coded' -or
     $forum -match '(?i)author description|placeholder|add the main mod description') {
     throw 'The forum draft is incomplete or omits peachyG''s development acknowledgement.'
 }

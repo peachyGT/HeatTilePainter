@@ -7,15 +7,12 @@ placement, rotation, edge, and layer order.
 Paint stays with the craft through save and load, launch, revert, variant changes, and supported
 procedural-part changes. The mod does not add decal parts or persistent overlay renderers.
 
-![Heat Tile Painter in flight](docs/screenshots/flight-topside.png)
+![Heat Tile Painter in flight](docs/screenshots/flight-underside.png)
 
 ## Requirements
 
 - Kerbal Space Program 1.12.5
 - ModuleManager
-
-Reforged Materials Redux is not required. Heat Tile Painter includes a private, renamed fork of the
-parts of Reforged it uses for material regions and caching.
 
 ## Install
 
@@ -88,17 +85,15 @@ does not add controls to the flight part-action window.
 
 ## Credits and license
 
-Heat Tile Painter is released under the MIT License by peachyG. See [LICENSE](LICENSE).
+Heat Tile Painter is released under the MIT License. See [LICENSE](LICENSE).
 
-The rendering and cache core is based on Reforged Materials Redux by J4COB, used under MIT. The HRSI
+The rendering and cache core is closely related to Reforged Materials Redux by J4COB, used under MIT. The HRSI
 patterns include MIT-licensed artwork derived from B9 Procedural Wings. Reforged texture assets are
 not included. Stock KSP Move and Rotate icons are read from the running game and are not
 redistributed. See [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) and
 [LICENSE-ASSETS.txt](LICENSE-ASSETS.txt) for the full notices.
 
-Most of the code was vibe-coded. peachyG directed the design, tested each build in KSP, and kept
-working through the save, procedural-part, rendering, and performance failures that turned up in
-real craft.
+Note that a lot of this mod was vibe coded.
 
 ## Build and test
 
