@@ -1,6 +1,7 @@
 # Local release output
 /dist/
 /release/HeatTilePainter.netkan.submission
+/GameData/HeatTileOverlayPrototype/PluginData/UserTextures*
 
 # Machine-specific development helpers and evidence
 /install-after-ksp-exit.ps1

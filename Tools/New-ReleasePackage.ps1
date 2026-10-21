@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.24.1'
+    [string]$Version = '0.25.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,11 +23,14 @@ foreach ($candidate in @($distRoot, $stageRoot, $auditRoot, $zipPath, $checksumP
 
 $required = @(
     'Assets\ui_icons.png'
+    'CustomTextures.cfg.example'
+    'ExteriorProfiles.cfg'
     'HeatTileOverlayPrototype.cfg'
     'HeatTilePainter.version'
     'LICENSE.txt'
     'LICENSE-ASSETS.txt'
     'Plugins\HeatTileOverlayPrototype.dll'
+    'PluginData\README-Custom-Textures.txt'
     'README.txt'
     'THIRD-PARTY-NOTICES.txt'
 )
@@ -38,7 +41,7 @@ foreach ($relative in $required) {
     }
 }
 
-$expectedDll = 'D3EFDE718014D210911ACE54836A1A0B8F7C8B1816B90280C05D6A2D8C4611CC'
+$expectedDll = 'C192218A0C5D05D65ECFB7F1C32440CD78613DD7DF1C62E52089AE3EB6E11074'
 $expectedAtlas = '756B51D787B3725D1D6730200A58A86FEDECCB1325BE820AD455CEFD3154DCE8'
 $dllHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'Plugins\HeatTileOverlayPrototype.dll') -Algorithm SHA256).Hash
 $atlasHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'Assets\ui_icons.png') -Algorithm SHA256).Hash
@@ -57,12 +60,23 @@ $stagePackage = Join-Path $stageRoot 'GameData\HeatTileOverlayPrototype'
 New-Item -ItemType Directory -Path (Split-Path -Parent $stagePackage) -Force | Out-Null
 Copy-Item -LiteralPath $packageRoot -Destination $stagePackage -Recurse
 
+# Browser imports are private user content. Never include them even if someone builds a release
+# from a working copy that has been used as a live KSP GameData folder.
+$stagePluginData = Join-Path $stagePackage 'PluginData'
+if (Test-Path -LiteralPath $stagePluginData) {
+    Get-ChildItem -LiteralPath $stagePluginData -Filter 'UserTextures*' | ForEach-Object {
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force
+    }
+}
+
 Compress-Archive -LiteralPath (Join-Path $stageRoot 'GameData') -DestinationPath $zipPath -CompressionLevel Optimal
 Expand-Archive -LiteralPath $zipPath -DestinationPath $auditRoot
 
 $auditedPackage = Join-Path $auditRoot 'GameData\HeatTileOverlayPrototype'
 $sourceFiles = Get-ChildItem -LiteralPath $packageRoot -Recurse -File | ForEach-Object {
     $_.FullName.Substring($packageRoot.Length + 1).Replace('\', '/')
+} | Where-Object {
+    -not $_.StartsWith('PluginData/UserTextures', [System.StringComparison]::OrdinalIgnoreCase)
 } | Sort-Object
 $archiveFiles = Get-ChildItem -LiteralPath $auditedPackage -Recurse -File | ForEach-Object {
     $_.FullName.Substring($auditedPackage.Length + 1).Replace('\', '/')

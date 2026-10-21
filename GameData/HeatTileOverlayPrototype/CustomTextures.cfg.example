@@ -1,0 +1,12 @@
+// Copy this file into your own GameData mod folder and rename it to end in .cfg.
+// Texture paths are relative to GameData and omit the image extension.
+HEAT_TILE_TEXTURE
+{
+    id = my_pack_black_tiles
+    displayName = My Pack Black Tiles
+    texture = MyTexturePack/Textures/black_tiles
+    normal = MyTexturePack/Textures/black_tiles_n
+    patternSpan = 1.28
+    specularity = 0.04
+    shininess = 0.06
+}

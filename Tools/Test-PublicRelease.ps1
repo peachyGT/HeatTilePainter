@@ -8,15 +8,15 @@ if ($versionFile.NAME -ne 'Heat Tile Painter' -or
     $versionFile.GITHUB.USERNAME -ne 'peachyGT' -or
     $versionFile.GITHUB.REPOSITORY -ne 'HeatTilePainter' -or
     $versionFile.VERSION.MAJOR -ne 0 -or
-    $versionFile.VERSION.MINOR -ne 24 -or
-    $versionFile.VERSION.PATCH -ne 1 -or
+    $versionFile.VERSION.MINOR -ne 25 -or
+    $versionFile.VERSION.PATCH -ne 0 -or
     $versionFile.KSP_VERSION.MAJOR -ne 1 -or
     $versionFile.KSP_VERSION.MINOR -ne 12 -or
     $versionFile.KSP_VERSION.PATCH -ne 5) {
     throw 'KSP-AVC release identity or compatibility is incorrect.'
 }
 
-$expectedDll = 'D3EFDE718014D210911ACE54836A1A0B8F7C8B1816B90280C05D6A2D8C4611CC'
+$expectedDll = 'C192218A0C5D05D65ECFB7F1C32440CD78613DD7DF1C62E52089AE3EB6E11074'
 $expectedAtlas = '756B51D787B3725D1D6730200A58A86FEDECCB1325BE820AD455CEFD3154DCE8'
 $actualDll = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'Plugins\HeatTileOverlayPrototype.dll') -Algorithm SHA256).Hash
 $actualAtlas = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'Assets\ui_icons.png') -Algorithm SHA256).Hash

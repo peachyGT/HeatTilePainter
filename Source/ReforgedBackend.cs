@@ -1,6 +1,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -39,6 +40,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
         readonly Dictionary<Renderer, Material[]> origShared = new Dictionary<Renderer, Material[]>();
         readonly Dictionary<Renderer, Mesh> origMesh = new Dictionary<Renderer, Mesh>();
         readonly List<Mesh> splitMeshes = new List<Mesh>();
+        const string SplitMeshPrefix = "__HeatTilePainterSplit";
         readonly List<Material> created = new List<Material>();
 
         static Shader tuShader;
@@ -306,6 +308,14 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 // A procedural part's prefab is only a seed shape. The settled live mesh is its
                 // authoritative unpainted source; substituting the prefab here changes its shape.
                 if (UsesDynamicMeshSource()) return null;
+                // The settled live mesh is also authoritative on stock parts. KSP and visual
+                // mods may clone or edit it. A prefab is only a recovery source for a copied
+                // painted renderer whose original ownership dictionary was not cloned.
+                bool copiedPaint = false;
+                foreach (Material material in r.sharedMaterials)
+                    if (material != null && material.HasProperty(IdMainTex)
+                        && WeatherCache.IsBaked(material.GetTexture(IdMainTex))) copiedPaint = true;
+                if (!copiedPaint) return null;
                 Transform pref = part.partInfo.partPrefab.transform;
                 Transform pt = pref.Find(RelPath(r.transform, part.transform));
                 MeshFilter pmf = (pt != null) ? pt.GetComponent<MeshFilter>() : null;
@@ -330,7 +340,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             Renderer[] all = root.GetComponentsInChildren<Renderer>(true);
             for (int i = 0; i < all.Length; i++)
             {
-                if (all[i] == null || SkipRenderer(all[i])) continue;
+                if (all[i] == null || SkipRenderer(all[i])
+                    || !HeatTileOverlayPrototype.ExteriorPaintPolicy.AllowsRenderer(part, all[i])) continue;
                 if (iva != null && all[i].transform.IsChildOf(iva)) continue;
                 if (all[i].GetComponentInParent<Camera>() != null) continue;
                 Part owner = all[i].GetComponentInParent<Part>();
@@ -374,10 +385,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
         void OnDestroy()
         {
             liveModules.Remove(this);
-            for (int i = 0; i < created.Count; i++) if (created[i] != null) Destroy(created[i]);
-            created.Clear();
-            for (int i = 0; i < splitMeshes.Count; i++) if (splitMeshes[i] != null) Destroy(splitMeshes[i]);
-            splitMeshes.Clear();
+            RestoreOriginals();
         }
 
         internal static bool DeferLoadBakes = true;
@@ -519,7 +527,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
         }
 
         internal static void ClipSoup(List<Vector3> V, List<Vector3> N, List<Vector4> T, List<Vector2> U,
-            Transform rt, Vector3 wdir, float cw, List<int> inTris, List<int> keep, List<int> drop)
+            Transform rt, Vector3 wdir, float cw, List<int> inTris, List<int> keep, List<int> drop,
+            bool normalPlane = false)
         {
             keep.Clear(); drop.Clear();
             List<int> rp = new List<int>(4), op = new List<int>(4);
@@ -527,7 +536,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             for (int t = 0; t + 2 < inTris.Count; t += 3)
             {
                 idx[0] = inTris[t]; idx[1] = inTris[t + 1]; idx[2] = inTris[t + 2];
-                for (int k = 0; k < 3; k++) dd[k] = Vector3.Dot(rt.TransformPoint(V[idx[k]]), wdir) - cw;
+                for (int k = 0; k < 3; k++) dd[k] = Vector3.Dot(normalPlane
+                    ? rt.TransformDirection(N[idx[k]]).normalized : rt.TransformPoint(V[idx[k]]), wdir) - cw;
                 rp.Clear(); op.Clear();
                 for (int k = 0; k < 3; k++)
                 {
@@ -548,6 +558,16 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 for (int i = 1; i + 1 < rp.Count; i++) { keep.Add(rp[0]); keep.Add(rp[i]); keep.Add(rp[i + 1]); }
                 for (int i = 1; i + 1 < op.Count; i++) { drop.Add(op[0]); drop.Add(op[i]); drop.Add(op[i + 1]); }
             }
+        }
+        void ClipRegionFacing(List<Vector3> v,List<Vector3> n,List<Vector4> t,List<Vector2> uv,
+            Renderer renderer,string region,ref List<int> painted,List<int> rest)
+        {
+            Vector3 direction;float threshold;
+            if(n==null || !WeatherCache.RegionFacingPlane(region,out direction,out threshold))return;
+            List<int> keep=new List<int>(),drop=new List<int>();
+            ClipSoup(v,n,t,uv,renderer.transform,part.transform.TransformDirection(direction),threshold,
+                painted,keep,drop,true);
+            painted=keep;rest.AddRange(drop);
         }
         bool AssignRegionSplit(Renderer r, Material[] work, Material[] pris, bool geom,
             Vector3 wdir, float cw, Vector3 upDir, float cwHeight, bool useHeight, int target)
@@ -573,7 +593,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 }
                 else { painted = keep1; stock = drop1; }
                 if (painted.Count == 0 || stock.Count == 0) return false;
-                Mesh nm = new Mesh();
+                Mesh nm = new Mesh(); nm.name = SplitMeshPrefix;
                 if (V.Count > 65000) nm.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
                 nm.vertices = V.ToArray();
                 if (N != null) nm.normals = N.ToArray();
@@ -667,6 +687,9 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 for (int j = 0; j < pris.Length; j++)
                 {
                     if (pris[j] == null) { work[j] = null; continue; }
+                    MeshFilter bakeFilter = r.GetComponent<MeshFilter>();
+                    Mesh bakeMesh = bakeFilter != null ? bakeFilter.sharedMesh : null;
+                    WeatherCache.BakeProjection projection = MeshProjection(r, bakeMesh, j, pris[j]);
                     Material m = new Material(pris[j]);
                     created.Add(m);
                     bool glass = IsGlass(m) && !isFairing;
@@ -692,7 +715,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                                 if (WeatherOn)
                                 {
                                     Texture wantB;
-                                    Texture want = WeatherCache.Baked(orig, ob, bakeStack, part, rdxScale, out wantB);
+                                    Texture want = WeatherCache.Baked(orig, ob, bakeStack, part,
+                                        rdxScale, out wantB, projection);
                                     if (want != null) dirt = want;
                                     if (wantB != null && m.HasProperty(IdBumpMap))
                                     {
@@ -715,7 +739,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                                 {
                                     Texture ob = m.HasProperty(IdBumpMap) ? m.GetTexture(IdBumpMap) : null;
                                     Texture wantB;
-                                    Texture want = WeatherCache.Baked(orig, ob, bakeStack, part, rdxScale, out wantB);
+                                    Texture want = WeatherCache.Baked(orig, ob, bakeStack, part,
+                                        rdxScale, out wantB, projection);
                                     if (want != null) m.SetTexture(IdMainTex, want);
                                     if (wantB != null && m.HasProperty(IdBumpMap)) m.SetTexture(IdBumpMap, wantB);
                                 }
@@ -871,6 +896,25 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             Material m = new Material(pristine); created.Add(m); return m;
         }
 
+        WeatherCache.BakeProjection MeshProjection(Renderer renderer, Mesh mesh, int materialSlot,
+            Material material)
+        {
+            if (renderer == null || mesh == null || !mesh.isReadable || mesh.subMeshCount <= 0)
+                return null;
+            return WeatherCache.CreateProjection(part, renderer, mesh,
+                Mathf.Clamp(materialSlot, 0, mesh.subMeshCount - 1), material);
+        }
+
+        WeatherCache.BakeProjection SoupProjection(Renderer renderer, List<Vector3> vertices,
+            List<Vector3> normals, List<Vector2> uvs, List<int> triangles, Material material)
+        {
+            if (renderer == null || vertices == null || uvs == null || triangles == null
+                || vertices.Count == 0 || uvs.Count != vertices.Count || triangles.Count < 3)
+                return null;
+            return WeatherCache.CreateProjection(part, renderer, vertices, normals, uvs, triangles,
+                material);
+        }
+
         Material BlitStock(Material pristine)
         {
             Material m = new Material(pristine); created.Add(m);
@@ -891,18 +935,24 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 string[] f = es[i].Split(':');
                 if (f.Length < 3) continue;
                 int ol; if (!int.TryParse(f[2], out ol)) continue;
-                float mul = (ol <= 5) ? ((ol >= 2) ? 2.5f : 0.6f) : ol / 100f;
+                float mul = WeatherCache.StackStrength(ol);
                 int nl = Mathf.Clamp(Mathf.RoundToInt(s * mul * 100f), 1, 250);
-                f[2] = nl.ToString();
+                f[2] = (1000 + nl).ToString(System.Globalization.CultureInfo.InvariantCulture);
                 es[i] = string.Join(":", f);
             }
             return string.Join(";", es);
         }
 
-        Material BuildZoneMaterial(Material pristineMat, Zone z) { return BuildZoneMaterial(pristineMat, z, 1f, false); }
-        Material BuildZoneMaterial(Material pristineMat, Zone z, float strength) { return BuildZoneMaterial(pristineMat, z, strength, false); }
+        Material BuildZoneMaterial(Material pristineMat, Zone z) { return BuildZoneMaterial(pristineMat, z, 1f, false, null); }
+        Material BuildZoneMaterial(Material pristineMat, Zone z, WeatherCache.BakeProjection projection)
+        { return BuildZoneMaterial(pristineMat, z, 1f, false, projection); }
+        Material BuildZoneMaterial(Material pristineMat, Zone z, float strength) { return BuildZoneMaterial(pristineMat, z, strength, false, null); }
         Material BuildZoneMaterial(Material pristineMat, Zone z, float strength, bool exactRegion)
+        { return BuildZoneMaterial(pristineMat, z, strength, exactRegion, null); }
+        Material BuildZoneMaterial(Material pristineMat, Zone z, float strength, bool exactRegion,
+            WeatherCache.BakeProjection projection)
         {
+            projection = WeatherCache.ForRegion(projection, z != null ? z.region : null);
             Material m = new Material(pristineMat); created.Add(m);
             if (IsGlass(m) && !isFairing) return m;
             bool weatherOn = !string.IsNullOrEmpty(z.stack);
@@ -921,7 +971,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     if (weatherOn)
                     {
                         Texture wantB;
-                        Texture want = WeatherCache.Baked(orig, ob, bakeStack, part, z.scale, out wantB);
+                        Texture want = WeatherCache.Baked(orig, ob, bakeStack, part, z.scale, out wantB, projection);
                         if (want != null) dirt = want;
                         if (wantB != null && m.HasProperty(IdBumpMap))
                         {
@@ -943,7 +993,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     {
                         Texture ob = m.HasProperty(IdBumpMap) ? m.GetTexture(IdBumpMap) : null;
                         Texture wantB;
-                        Texture want = WeatherCache.Baked(orig, ob, bakeStack, part, z.scale, out wantB);
+                        Texture want = WeatherCache.Baked(orig, ob, bakeStack, part, z.scale, out wantB, projection);
                         if (want != null) m.SetTexture(IdMainTex, want);
                         if (wantB != null && m.HasProperty(IdBumpMap)) m.SetTexture(IdBumpMap, wantB);
                     }
@@ -970,11 +1020,10 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 if (fields.Length < 1 || string.IsNullOrEmpty(fields[0])) continue;
                 if (fields[0].StartsWith("tint#", StringComparison.OrdinalIgnoreCase))
                     return HeatTileOverlayPrototype.HeatTileTextureLibrary.Find("porkjet_matte");
-                IList<HeatTileOverlayPrototype.HeatTileTextureDefinition> definitions =
-                    HeatTileOverlayPrototype.HeatTileTextureLibrary.Definitions;
-                for (int i = 0; i < definitions.Count; i++)
-                    if (string.Equals(TextureLeaf(definitions[i].TexturePath), fields[0],
-                        StringComparison.OrdinalIgnoreCase)) return definitions[i];
+                HeatTileOverlayPrototype.HeatTileTextureDefinition definition;
+                if (HeatTileOverlayPrototype.HeatTileTextureLibrary.FindExact(fields[0], out definition)
+                    || HeatTileOverlayPrototype.HeatTileTextureLibrary.FindByTextureLeaf(fields[0], out definition))
+                    return definition;
             }
             return null;
         }
@@ -1036,12 +1085,17 @@ namespace HeatTileOverlayPrototype.ReforgedCore
         }
         Material BuildSmoothFadeMaterial(Material baseMat, Zone z, float[] customMask)
         {
-            return BuildSmoothFadeMaterial(baseMat, z, customMask, false);
+            return BuildSmoothFadeMaterial(baseMat, z, customMask, false, null);
         }
 
         Material BuildSmoothFadeMaterial(Material baseMat, Zone z, float[] customMask,
             bool exactRegion)
+        { return BuildSmoothFadeMaterial(baseMat, z, customMask, exactRegion, null); }
+
+        Material BuildSmoothFadeMaterial(Material baseMat, Zone z, float[] customMask,
+            bool exactRegion, WeatherCache.BakeProjection projection)
         {
+            projection = WeatherCache.ForRegion(projection, z != null ? z.region : null);
             Material m = new Material(baseMat); created.Add(m);
             if (IsGlass(m) && !isFairing) return m;
             if (!m.HasProperty(IdMainTex)) return m;
@@ -1055,7 +1109,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             {
                 Texture ob = m.HasProperty(IdBumpMap) ? m.GetTexture(IdBumpMap) : null;
                 Texture wantB;
-                Texture want = WeatherCache.Baked(orig, ob, stack, part, z.scale, out wantB, customMask);
+                Texture want = WeatherCache.Baked(orig, ob, stack, part, z.scale, out wantB,
+                    customMask, projection);
                 Texture result = (want != null) ? want : orig;
                 if (rdxKeepShiny && WeatherCache.HasShiny(orig))
                 {
@@ -1110,10 +1165,114 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             return true;
         }
 
+        internal Mesh PreviewSourceMesh(Renderer renderer, Mesh fallback)
+        {
+            Mesh source;
+            return origMesh.TryGetValue(renderer, out source) && source != null ? source : fallback;
+        }
+
+        // Extend the existing geometric partition to reserve unpaintable triangles in their
+        // original material. This keeps an interior original even when it reuses cover UVs.
+        void RebuildExterior(Renderer renderer, Mesh source, Material[] pristineMaterials,
+            List<Zone> zones, List<Renderer> renderers)
+        {
+            MeshFilter filter = renderer.GetComponent<MeshFilter>();
+            if (filter == null || source == null || !source.isReadable) return;
+            try
+            {
+                List<Vector3> vertices, normals; List<Vector4> tangents; List<Vector2> uvs; List<int> ignored;
+                MeshToLists(source, out vertices, out normals, out tangents, out uvs, out ignored);
+                List<List<int>> output = new List<List<int>>();
+                List<Material> materials = new List<Material>();
+                for (int slot=0; slot<source.subMeshCount; slot++)
+                {
+                    Material original = pristineMaterials[Math.Min(slot, pristineMaterials.Length-1)];
+                    int[] triangles=source.GetTriangles(slot);
+                    bool[] exterior=HeatTileOverlayPrototype.ExteriorPaintPolicy.Triangles(part,renderer,source,slot);
+                    List<int> pool=new List<int>(), untouched=new List<int>();
+                    for(int i=0;i+2<triangles.Length;i+=3)
+                    {
+                        bool paint=original!=null && !IsGlass(original) && exterior!=null && i/3<exterior.Length && exterior[i/3];
+                        List<int> target=paint?pool:untouched;
+                        target.Add(triangles[i]); target.Add(triangles[i+1]); target.Add(triangles[i+2]);
+                    }
+                    for(int z=zones.Count-1;z>=0 && pool.Count>0;z--)
+                    {
+                        Zone zone=zones[z];
+                        Vector3 direction; float cut,cutHeight,fade,fadeHeight; bool useHeight;
+                        Vector3 up=part.transform.up;
+                        if(!ZoneGeom(zone.region,renderers,out direction,out cut,up,out cutHeight,out useHeight,out fade,out fadeHeight)) continue;
+                        List<int> painted=new List<int>(), rest=new List<int>();
+                        ClipSoup(vertices,normals,tangents,uvs,renderer.transform,direction,cut,pool,painted,rest);
+                        if(useHeight)
+                        {
+                            List<int> kept=new List<int>(), rejected=new List<int>();
+                            ClipSoup(vertices,normals,tangents,uvs,renderer.transform,-up,-cutHeight,painted,kept,rejected);
+                            painted=kept; rest.AddRange(rejected);
+                        }
+                        ClipRegionFacing(vertices,normals,tangents,uvs,renderer,zone.region,ref painted,rest);
+                        pool=rest;
+                        if(painted.Count==0) continue;
+                        List<List<int>> uvBatches = WeatherCache.HasWorldScaledLayer(zone.stack) || fade>1e-4f
+                            ? HeatTileOverlayPrototype.UvPaintPartition.Split(uvs, painted,
+                                original.mainTextureScale, original.mainTextureOffset)
+                            : new List<List<int>> { painted };
+                        foreach (List<int> uvBatch in uvBatches)
+                        {
+                        painted = uvBatch;
+                        WeatherCache.BakeProjection projection=SoupProjection(renderer,vertices,normals,uvs,painted,original);
+                        Material material;
+                        if(fade>1e-4f && uvs!=null && uvs.Count==vertices.Count)
+                        {
+                            List<float> weights=new List<float>(vertices.Count);
+                            for(int v=0;v<vertices.Count;v++)
+                            {
+                                Vector3 world=renderer.transform.TransformPoint(vertices[v]);
+                                float weight=Mathf.Clamp01((Vector3.Dot(world,direction)-cut)/fade);
+                                if(useHeight) weight*=Mathf.Clamp01((cutHeight-Vector3.Dot(world,up))/fadeHeight);
+                                if(normals!=null && v<normals.Count) weight*=WeatherCache.RegionFacingWeight(zone.region,part.transform.InverseTransformDirection(renderer.transform.TransformDirection(normals[v])).normalized);
+                                weights.Add(weight);
+                            }
+                            float[] mask=WeatherCache.RasterMask(uvs,weights,painted);
+                            material=BuildSmoothFadeMaterial(original,zone,mask,true,projection);
+                        }
+                        else material=BuildZoneMaterial(original,zone,1f,true,projection);
+                        output.Add(painted); materials.Add(material);
+                        }
+                    }
+                    untouched.AddRange(pool);
+                    if(untouched.Count>0) { output.Add(untouched); materials.Add(original); }
+                }
+                if(output.Count==0) return;
+                Mesh result=new Mesh(); result.name=SplitMeshPrefix + "-Exterior";
+                if(vertices.Count>65000) result.indexFormat=UnityEngine.Rendering.IndexFormat.UInt32;
+                result.SetVertices(vertices); if(normals!=null) result.SetNormals(normals);
+                if(tangents!=null) result.SetTangents(tangents); if(uvs!=null) result.SetUVs(0,uvs);
+                result.subMeshCount=output.Count;
+                for(int i=0;i<output.Count;i++) result.SetTriangles(output[i],i,false);
+                result.RecalculateBounds(); filter.sharedMesh=result; splitMeshes.Add(result);
+                renderer.sharedMaterials=materials.ToArray();
+            }
+            catch(Exception exception)
+            {
+                filter.sharedMesh=source; renderer.sharedMaterials=pristineMaterials;
+                Debug.LogWarning("[HeatTilePainter] Exterior paint safely declined: "+exception.Message);
+            }
+        }
+
         void RebuildMulti(List<Zone> extras)
         {
             List<Renderer> rs = OwnRenderers();
             RestoreMeshesToOriginal();
+            // Resolve every original before any renderer acquires a disposable split.
+            foreach (Renderer sourceRenderer in rs)
+                if (!origMesh.ContainsKey(sourceRenderer))
+                {
+                    MeshFilter sourceFilter = sourceRenderer.GetComponent<MeshFilter>();
+                    Mesh prefabSource = PrefabMesh(sourceRenderer);
+                    origMesh[sourceRenderer] = prefabSource != null ? prefabSource
+                        : (sourceFilter == null ? null : sourceFilter.sharedMesh);
+                }
             List<Zone> zones = new List<Zone>(extras);
             Zone act = ActiveZone();
             if (act.HasContent) { zones.RemoveAll(delegate(Zone zz) { return zz.region == act.region; }); zones.Add(act); }
@@ -1129,6 +1288,11 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 MeshFilter mf = r.GetComponent<MeshFilter>();
                 if (!origMesh.ContainsKey(r)) { Mesh pm = PrefabMesh(r); origMesh[r] = (pm != null) ? pm : (mf != null ? mf.sharedMesh : null); }
                 Mesh src = origMesh[r];
+                if (HeatTileOverlayPrototype.ExteriorPaintPolicy.IsDeployable(part))
+                {
+                    RebuildExterior(r, src, pris, zones, rs);
+                    continue;
+                }
                 bool singleSub = mf != null && src != null && src.isReadable && src.subMeshCount == 1 && pris.Length == 1 && pris[0] != null;
 
                 List<Zone> geo = zones.FindAll(delegate(Zone z)
@@ -1150,6 +1314,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     {
                         List<Vector3> V, N; List<Vector4> T; List<Vector2> U; List<int> tris;
                         MeshToLists(src, out V, out N, out T, out U, out tris);
+                        WeatherCache.BakeProjection fullProjection = SoupProjection(r, V, N, U,
+                            tris, pris[0]);
 
                         Vector3 upDir0 = part.transform.up;
                         // Do not collapse placed regions into one UV-masked material. Many KSP
@@ -1166,7 +1332,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                         }
                         if (allFaded)
                         {
-                            Material combined = (whole != null && whole.HasContent) ? BuildZoneMaterial(pris[0], whole) : pris[0];
+                            Material combined = (whole != null && whole.HasContent)
+                                ? BuildZoneMaterial(pris[0], whole, fullProjection) : pris[0];
                             string fmBase = "fm|" + src.GetInstanceID() + "|g" +
                                 WeatherCache.GeometrySignature(part) + "|";
                             for (int z = 0; z < geo.Count; z++)
@@ -1198,7 +1365,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                                     cm = WeatherCache.RasterMask(U, wv, zreg);
                                     WeatherCache.PutFadeMask(fmBase + geo[z].region, cm);
                                 }
-                                combined = BuildSmoothFadeMaterial(combined, geo[z], MaskUsable(cm) ? cm : null);
+                                combined = BuildSmoothFadeMaterial(combined, geo[z],
+                                    MaskUsable(cm) ? cm : null, false, fullProjection);
                             }
                             r.materials = new Material[] { combined };
                             continue;
@@ -1221,15 +1389,25 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                                 ClipSoup(V, N, T, U, r.transform, -upDir, -cwH, keep, k2, d2);
                                 painted = k2; drop.AddRange(d2);
                             }
+                            ClipRegionFacing(V,N,T,U,r,geo[z].region,ref painted,drop);
                             pool = drop;
                             if (painted.Count == 0) continue;
                             Zone mz = MergeBase(whole, geo[z]);
+                            List<List<int>> uvBatches = WeatherCache.HasWorldScaledLayer(mz.stack) || fadeAxisW>1e-4f
+                                ? HeatTileOverlayPrototype.UvPaintPartition.Split(U, painted,
+                                    pris[0].mainTextureScale, pris[0].mainTextureOffset)
+                                : new List<List<int>> { painted };
+                            foreach (List<int> uvBatch in uvBatches)
+                            {
+                            painted = uvBatch;
+                            WeatherCache.BakeProjection paintedProjection = SoupProjection(r, V, N,
+                                U, painted, pris[0]);
                             if (fadeAxisW > 1e-4f && U != null && U.Count == V.Count)
                             {
 
                                 float[] cm;
                                 string fsKey = "fs|" + src.GetInstanceID() + "|g" +
-                                    WeatherCache.GeometrySignature(part) + "|" + geo[z].region;
+                                    WeatherCache.GeometrySignature(part) + "|" + geo[z].region + "|p" + paintedProjection.Signature;
                                 if (!WeatherCache.TryFadeMask(fsKey, out cm))
                                 {
                                     List<float> wv = new List<float>(V.Count);
@@ -1249,23 +1427,29 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                                     cm = WeatherCache.RasterMask(U, wv, painted);
                                     WeatherCache.PutFadeMask(fsKey, cm);
                                 }
-                                Material baseMat = (whole != null && whole.HasContent) ? BuildZoneMaterial(pris[0], whole) : pris[0];
+                                Material baseMat = (whole != null && whole.HasContent)
+                                    ? BuildZoneMaterial(pris[0], whole, paintedProjection) : pris[0];
                                 subTris.Add(painted); subMats.Add(BuildSmoothFadeMaterial(baseMat,
-                                    geo[z], MaskUsable(cm) ? cm : null, true));
+                                    geo[z], MaskUsable(cm) ? cm : null, true, paintedProjection));
                                 fadedHere = true;
                             }
-                            else { subTris.Add(painted); subMats.Add(BuildZoneMaterial(pris[0], mz, 1f, true)); }
+                            else { subTris.Add(painted); subMats.Add(BuildZoneMaterial(pris[0], mz,
+                                1f, true, paintedProjection)); }
+                            }
                         }
                         if (pool.Count > 0)
                         {
                             Zone lz = (baseZone != null && baseZone.HasContent) ? MergeBase(whole, baseZone) : whole;
-                            Material rest = (lz != null && lz.HasContent) ? BuildZoneMaterial(pris[0], lz)
+                            WeatherCache.BakeProjection restProjection = SoupProjection(r, V, N, U,
+                                pool, pris[0]);
+                            Material rest = (lz != null && lz.HasContent)
+                                          ? BuildZoneMaterial(pris[0], lz, restProjection)
                                           : (fadedHere ? BlitStock(pris[0]) : StockCopy(pris[0]));
                             subTris.Add(pool);
                             subMats.Add(rest);
                         }
                         if (subTris.Count == 0) { r.materials = new Material[] { StockCopy(pris[0]) }; continue; }
-                        Mesh nm = new Mesh();
+                        Mesh nm = new Mesh(); nm.name = SplitMeshPrefix;
                         if (V.Count > 65000) nm.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
                         nm.vertices = V.ToArray();
                         if (N != null) nm.normals = N.ToArray();
@@ -1288,10 +1472,13 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     for (int j = 0; j < pris.Length; j++)
                     {
                         if (pris[j] == null) { work[j] = null; continue; }
+                        WeatherCache.BakeProjection slotProjection = MeshProjection(r, src, j,
+                            pris[j]);
                         Material combined = (whole != null && whole.HasContent)
-                            ? BuildZoneMaterial(pris[j], whole) : StockCopy(pris[j]);
+                            ? BuildZoneMaterial(pris[j], whole, slotProjection) : StockCopy(pris[j]);
                         for (int z = 0; z < geo.Count; z++)
-                            combined = BuildSmoothFadeMaterial(combined, geo[z], null);
+                            combined = BuildSmoothFadeMaterial(combined, geo[z], null, false,
+                                slotProjection);
                         work[j] = combined;
                     }
                     r.materials = work;
@@ -1302,10 +1489,13 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     for (int j = 0; j < pris.Length; j++)
                     {
                         if (pris[j] == null) { work[j] = null; continue; }
+                        WeatherCache.BakeProjection slotProjection = MeshProjection(r, src, j,
+                            pris[j]);
                         string key = "pick|" + RelPath(r.transform, part.transform) + "#" + j;
                         Zone pz = pick.Find(delegate(Zone z) { return z.region == key; });
-                        if (pz != null) work[j] = BuildZoneMaterial(pris[j], MergeBase(whole, pz));
-                        else { Zone lz = (baseZone != null && baseZone.HasContent) ? MergeBase(whole, baseZone) : whole; work[j] = (lz != null && lz.HasContent) ? BuildZoneMaterial(pris[j], lz) : StockCopy(pris[j]); }
+                        if (pz != null) work[j] = BuildZoneMaterial(pris[j],
+                            MergeBase(whole, pz), slotProjection);
+                        else { Zone lz = (baseZone != null && baseZone.HasContent) ? MergeBase(whole, baseZone) : whole; work[j] = (lz != null && lz.HasContent) ? BuildZoneMaterial(pris[j], lz, slotProjection) : StockCopy(pris[j]); }
                     }
                     r.materials = work;
                 }
@@ -1316,7 +1506,10 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     for (int j = 0; j < pris.Length; j++)
                     {
                         if (pris[j] == null) { work[j] = null; continue; }
-                        work[j] = (lz != null && lz.HasContent) ? BuildZoneMaterial(pris[j], lz) : StockCopy(pris[j]);
+                        WeatherCache.BakeProjection slotProjection = MeshProjection(r, src, j,
+                            pris[j]);
+                        work[j] = (lz != null && lz.HasContent)
+                            ? BuildZoneMaterial(pris[j], lz, slotProjection) : StockCopy(pris[j]);
                     }
                     r.materials = work;
                 }
@@ -1403,6 +1596,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
 
         public void ClearAll(bool reapplyVariant)
         {
+            RefreshDynamicMeshSources();
             rdxFinish = false; rdxColored = false; rdxStack = ""; rdxZones = "";
             UpdateHeatBuff();
             RestoreOriginals(reapplyVariant);
@@ -1436,6 +1630,13 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             {
                 MeshFilter mf = rs[i].GetComponent<MeshFilter>();
                 if (mf == null || mf.sharedMesh == null || splitMeshes.Contains(mf.sharedMesh)) continue;
+                // MeshFilter.mesh clones our shared partition when another mod reads it.
+                // Unity preserves its name: never promote that clone to authoritative source.
+                if (mf.sharedMesh.name.StartsWith(SplitMeshPrefix, StringComparison.Ordinal))
+                {
+                    splitMeshes.Add(mf.sharedMesh);
+                    continue;
+                }
                 // A procedural generator has supplied (or retained) the live authoritative mesh.
                 // Capture it before Rebuild restores any previous disposable partition.
                 origMesh[rs[i]] = mf.sharedMesh;
@@ -3538,8 +3739,215 @@ namespace HeatTileOverlayPrototype.ReforgedCore
 
     internal static class WeatherCache
     {
+        internal static float StackStrength(int level)
+        {
+            return level >= 1000 ? Math.Max(0, Math.Min(250, level - 1000)) / 100f
+                : (level <= 5 ? (level >= 2 ? 2.5f : 0.6f) : level / 100f);
+        }
         const string OverlayPath = "HeatTileOverlayPrototype/Assets/";
         const string Tag = "[HeatTilePainter/ReforgedCore] ";
+
+        // Describes the settled physical surface that owns one baked material. Stock UVs are used
+        // only to locate output texels; Heat Tile Painter pattern coordinates come from the
+        // interpolated part-local position. Exact region splits provide their clipped triangle
+        // subset so overlapping top/bottom UV islands remain independent.
+        internal sealed class BakeProjection
+        {
+            internal Part Part;
+            internal Renderer Renderer;
+            internal Mesh Mesh;
+            internal IList<Vector3> Vertices;
+            internal IList<Vector3> Normals;
+            internal IList<Vector2> Uvs;
+            internal IList<int> Triangles;
+            internal int Submesh = -1;
+            internal Matrix4x4 ToPart;
+            internal Matrix4x4 NormalToPart;
+            internal Vector2 TextureScale = Vector2.one;
+            internal Vector2 TextureOffset = Vector2.zero;
+            internal TextureWrapMode WrapMode = TextureWrapMode.Repeat;
+            internal bool HasBasis;
+            internal Vector3 BasisU;
+            internal Vector3 BasisV;
+            internal int Signature;
+
+            internal bool Usable
+            {
+                get
+                {
+                    if (Part == null || Renderer == null) return false;
+                    int vertexCount = Vertices != null ? Vertices.Count : (Mesh != null ? Mesh.vertexCount : 0);
+                    bool hasUvs = Uvs != null ? Uvs.Count == vertexCount : Mesh != null && Mesh.isReadable;
+                    return vertexCount > 0 && hasUvs
+                        && (Triangles != null ? Triangles.Count >= 3 : Mesh != null && Mesh.isReadable);
+                }
+            }
+        }
+
+        internal static BakeProjection CreateProjection(Part part, Renderer renderer, Mesh mesh,
+            int submesh, Material material)
+        {
+            BakeProjection projection = new BakeProjection();
+            projection.Part = part;
+            projection.Renderer = renderer;
+            projection.Mesh = mesh;
+            projection.Submesh = submesh;
+            InitializeProjection(projection, material);
+            return projection;
+        }
+
+        internal static BakeProjection CreateProjection(Part part, Renderer renderer,
+            IList<Vector3> vertices, IList<Vector3> normals, IList<Vector2> uvs,
+            IList<int> triangles, Material material)
+        {
+            BakeProjection projection = new BakeProjection();
+            projection.Part = part;
+            projection.Renderer = renderer;
+            projection.Vertices = vertices;
+            projection.Normals = normals;
+            projection.Uvs = uvs;
+            projection.Triangles = triangles;
+            InitializeProjection(projection, material);
+            return projection;
+        }
+
+        internal static BakeProjection ForRegion(BakeProjection source, string region)
+        {
+            if (source == null) return null;
+            Vector3 direction; float cut, fade, height;
+            if (!RegionAxisDir(region, out direction, out cut, out fade, out height)) return source;
+            // Opposite sides share the same mapping plane and phase.
+            if (Mathf.Abs(direction.x) > 0.0001f ? direction.x < 0f
+                : (Mathf.Abs(direction.y) > 0.0001f ? direction.y < 0f : direction.z < 0f))
+                direction = -direction;
+            Vector3 reference = Mathf.Abs(Vector3.Dot(direction, Vector3.up)) > 0.95f
+                ? Vector3.right : Vector3.up;
+            Vector3 basisU = Vector3.Cross(reference, direction).normalized;
+            Vector3 basisV = Vector3.Cross(direction, basisU).normalized;
+            BakeProjection projection = new BakeProjection();
+            projection.Part = source.Part;
+            projection.Renderer = source.Renderer;
+            projection.Mesh = source.Mesh;
+            projection.Vertices = source.Vertices;
+            projection.Normals = source.Normals;
+            projection.Uvs = source.Uvs;
+            projection.Triangles = source.Triangles;
+            projection.Submesh = source.Submesh;
+            projection.ToPart = source.ToPart;
+            projection.NormalToPart = source.NormalToPart;
+            projection.TextureScale = source.TextureScale;
+            projection.TextureOffset = source.TextureOffset;
+            projection.WrapMode = source.WrapMode;
+            projection.HasBasis = true;
+            projection.BasisU = basisU;
+            projection.BasisV = basisV;
+            unchecked
+            {
+                projection.Signature = source.Signature;
+                projection.Signature = projection.Signature * 31 + Mathf.RoundToInt(basisU.x * 10000f);
+                projection.Signature = projection.Signature * 31 + Mathf.RoundToInt(basisU.y * 10000f);
+                projection.Signature = projection.Signature * 31 + Mathf.RoundToInt(basisU.z * 10000f);
+                projection.Signature = projection.Signature * 31 + Mathf.RoundToInt(basisV.x * 10000f);
+                projection.Signature = projection.Signature * 31 + Mathf.RoundToInt(basisV.y * 10000f);
+                projection.Signature = projection.Signature * 31 + Mathf.RoundToInt(basisV.z * 10000f);
+            }
+            return projection;
+        }
+
+        static void InitializeProjection(BakeProjection projection, Material material)
+        {
+            projection.ToPart = RelativeMatrix(projection.Renderer != null ? projection.Renderer.transform : null,
+                projection.Part != null ? projection.Part.transform : null);
+            projection.NormalToPart = projection.ToPart.inverse.transpose;
+            if (material != null && material.HasProperty("_MainTex"))
+            {
+                projection.TextureScale = material.GetTextureScale("_MainTex");
+                projection.TextureOffset = material.GetTextureOffset("_MainTex");
+                Texture source = Original(material.GetTexture("_MainTex"));
+                if (source != null) projection.WrapMode = source.wrapMode;
+            }
+            projection.Signature = ProjectionSignature(projection);
+        }
+
+        static Matrix4x4 RelativeMatrix(Transform from, Transform to)
+        {
+            if (from == null || to == null || from == to) return Matrix4x4.identity;
+            Matrix4x4 result = Matrix4x4.identity;
+            Transform current = from;
+            while (current != null && current != to)
+            {
+                result = Matrix4x4.TRS(current.localPosition, current.localRotation, current.localScale) * result;
+                current = current.parent;
+            }
+            return current == to ? result : to.worldToLocalMatrix * from.localToWorldMatrix;
+        }
+
+        static int StableTextHash(string value)
+        {
+            unchecked
+            {
+                int hash = 17;
+                if (value != null) for (int i = 0; i < value.Length; i++) hash = hash * 31 + value[i];
+                return hash;
+            }
+        }
+
+        static int ProjectionSignature(BakeProjection projection)
+        {
+            unchecked
+            {
+                int hash = 17;
+                hash = hash * 31 + StableTextHash(projection.Renderer != null && projection.Part != null
+                    ? ModuleHeatTileReforgedCore.RelPath(projection.Renderer.transform, projection.Part.transform) : "");
+                int vertexCount = projection.Vertices != null ? projection.Vertices.Count
+                    : (projection.Mesh != null ? projection.Mesh.vertexCount : 0);
+                hash = hash * 31 + vertexCount;
+                hash = hash * 31 + projection.Submesh;
+                for (int i = 0; i < 16; i++) hash = hash * 31
+                    + Mathf.RoundToInt(projection.ToPart[i] * 10000f);
+                hash = hash * 31 + Mathf.RoundToInt(projection.TextureScale.x * 10000f);
+                hash = hash * 31 + Mathf.RoundToInt(projection.TextureScale.y * 10000f);
+                hash = hash * 31 + Mathf.RoundToInt(projection.TextureOffset.x * 10000f);
+                hash = hash * 31 + Mathf.RoundToInt(projection.TextureOffset.y * 10000f);
+                IList<int> triangles = projection.Triangles;
+                if (triangles != null)
+                {
+                    hash = hash * 31 + triangles.Count;
+                    for (int i = 0; i < triangles.Count; i++)
+                    {
+                        int index = triangles[i];
+                        hash = hash * 31 + index;
+                        if (projection.Vertices != null && index >= 0
+                            && index < projection.Vertices.Count)
+                        {
+                            Vector3 position = projection.Vertices[index];
+                            hash = hash * 31 + Mathf.RoundToInt(position.x * 10000f);
+                            hash = hash * 31 + Mathf.RoundToInt(position.y * 10000f);
+                            hash = hash * 31 + Mathf.RoundToInt(position.z * 10000f);
+                        }
+                        if (projection.Uvs != null && index >= 0 && index < projection.Uvs.Count)
+                        {
+                            Vector2 uv = projection.Uvs[index];
+                            hash = hash * 31 + Mathf.RoundToInt(uv.x * 10000f);
+                            hash = hash * 31 + Mathf.RoundToInt(uv.y * 10000f);
+                        }
+                    }
+                }
+                else if (projection.Mesh != null)
+                {
+                    hash = hash * 31 + projection.Mesh.GetInstanceID();
+                    hash = hash * 31 + projection.Mesh.subMeshCount;
+                    Bounds bounds = projection.Mesh.bounds;
+                    hash = hash * 31 + Mathf.RoundToInt(bounds.center.x * 1000f);
+                    hash = hash * 31 + Mathf.RoundToInt(bounds.center.y * 1000f);
+                    hash = hash * 31 + Mathf.RoundToInt(bounds.center.z * 1000f);
+                    hash = hash * 31 + Mathf.RoundToInt(bounds.extents.x * 1000f);
+                    hash = hash * 31 + Mathf.RoundToInt(bounds.extents.y * 1000f);
+                    hash = hash * 31 + Mathf.RoundToInt(bounds.extents.z * 1000f);
+                }
+                return hash;
+            }
+        }
 
         static readonly Dictionary<int, Texture> bakedToOrig = new Dictionary<int, Texture>();
         static readonly Dictionary<string, Texture2D> baked = new Dictionary<string, Texture2D>();
@@ -3567,6 +3975,14 @@ namespace HeatTileOverlayPrototype.ReforgedCore
         static readonly Dictionary<string, Color32[]> overlayPix = new Dictionary<string, Color32[]>();
         static readonly Dictionary<string, int> overlayW = new Dictionary<string, int>();
         static readonly Dictionary<string, int> overlayH = new Dictionary<string, int>();
+        internal static void InvalidateOverlay(string id)
+        {
+            foreach (string suffix in new[] { "", "_n", "_b", "_b_n" })
+            {
+                string key = id + suffix;
+                overlayPix.Remove(key); overlayW.Remove(key); overlayH.Remove(key);
+            }
+        }
         static readonly Dictionary<string, float[]> masks = new Dictionary<string, float[]>();
         static readonly HashSet<string> maskWarned = new HashSet<string>();
         const int MR = 128;
@@ -3589,7 +4005,12 @@ namespace HeatTileOverlayPrototype.ReforgedCore
 
         static float TileMeters(string name)
         {
-            switch (name)
+            string definitionName = name != null && name.EndsWith("_b", StringComparison.OrdinalIgnoreCase)
+                ? name.Substring(0, name.Length - 2) : name;
+            HeatTileOverlayPrototype.HeatTileTextureDefinition definition;
+            if (HeatTileOverlayPrototype.HeatTileTextureLibrary.FindExact(definitionName, out definition))
+                return Mathf.Max(0.05f, definition.PatternSpan);
+            switch (definitionName)
             {
                 case "hrsi_legacy": return 1.28f;
                 case "hrsi_b9_exact": return 4.0f;
@@ -3645,7 +4066,12 @@ namespace HeatTileOverlayPrototype.ReforgedCore
 
         static bool WorldScaled(string name)
         {
-            switch (name)
+            string definitionName = name != null && name.EndsWith("_b", StringComparison.OrdinalIgnoreCase)
+                ? name.Substring(0, name.Length - 2) : name;
+            HeatTileOverlayPrototype.HeatTileTextureDefinition definition;
+            if (HeatTileOverlayPrototype.HeatTileTextureLibrary.FindExact(definitionName, out definition))
+                return !definition.IsFlatColor;
+            switch (definitionName)
             {
                 case "hrsi_legacy": case "hrsi_b9_exact": case "hrsi_b9_hd": case "hrsi_brick":
                 case "edge_gasket": case "edge_reinforced":
@@ -3701,8 +4127,22 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 w = overlayW[name]; h = overlayH[name];
                 return true;
             }
-            Texture2D tex = (GameDatabase.Instance != null)
-                ? GameDatabase.Instance.GetTexture(OverlayPath + name, false) : null;
+            Texture2D tex = null;
+            bool definitionNormal = false;
+            string definitionId = name;
+            HeatTileOverlayPrototype.HeatTileTextureDefinition definition;
+            if (!HeatTileOverlayPrototype.HeatTileTextureLibrary.FindExact(definitionId, out definition)
+                && name.EndsWith("_n", StringComparison.OrdinalIgnoreCase))
+            {
+                definitionId = name.Substring(0, name.Length - 2);
+                definitionNormal = true;
+            }
+            if (!HeatTileOverlayPrototype.HeatTileTextureLibrary.TryResolveTexture(
+                    definitionId, definitionNormal, out tex))
+            {
+                tex = (GameDatabase.Instance != null)
+                    ? GameDatabase.Instance.GetTexture(OverlayPath + name, false) : null;
+            }
             if (tex == null)
             {
                 Debug.LogWarning(Tag + "weathering overlay missing: " + name);
@@ -3734,7 +4174,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     return false;
                 }
             }
-            if (name.EndsWith("_n") && pix != null)
+            if ((definitionNormal || name.EndsWith("_n")) && pix != null)
                 for (int i = 0; i < pix.Length; i++) pix[i].a = pix[i].r;
             overlayPix[name] = pix; overlayW[name] = w; overlayH[name] = h;
             return pix != null;
@@ -3776,6 +4216,8 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     Renderer r = rs[i];
                     MeshFilter mf = r != null ? r.GetComponent<MeshFilter>() : null;
                     Mesh mesh = mf != null ? mf.sharedMesh : null;
+                    ModuleHeatTileReforgedCore core = part.FindModuleImplementing<ModuleHeatTileReforgedCore>();
+                    if (core != null) mesh = core.PreviewSourceMesh(r, mesh);
                     if (mesh == null) { h = h * 31; continue; }
                     h = h * 31 + mesh.GetInstanceID();
                     h = h * 31 + mesh.vertexCount;
@@ -3807,47 +4249,207 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             return false;
         }
 
-        static readonly Dictionary<int, float> uvScaleCache = new Dictionary<int, float>();
-        static float UvWorldScale(Part part)
+        internal static bool HasWorldScaledLayer(string stackSpec)
         {
-            if (part == null) return -1f;
-            int key;
-            unchecked { key = part.GetInstanceID() * 397 ^ GeometrySignature(part); }
-            float cached;
+            if (string.IsNullOrEmpty(stackSpec)) return false;
+            string[] entries = stackSpec.Split(';');
+            for (int i = 0; i < entries.Length; i++)
+            {
+                string[] fields = entries[i].Split(':');
+                if (fields.Length > 0 && !fields[0].StartsWith("tint#") && WorldScaled(fields[0]))
+                    return true;
+            }
+            return false;
+        }
+
+        static readonly Dictionary<string, Vector2> uvScaleCache = new Dictionary<string, Vector2>();
+
+        // A bounded logarithmic histogram gives the world-area-weighted median without retaining
+        // every triangle on large procedural meshes. The median ignores tiny, heavily stretched
+        // atlas islands that used to skew the single whole-part area ratio.
+        sealed class UvScaleHistogram
+        {
+            const int BinCount = 192;
+            const double MinimumLog2 = -12.0;
+            const double MaximumLog2 = 16.0;
+            readonly double[] weights = new double[BinCount];
+            double totalWeight;
+
+            public void Add(double metresPerUv, double worldArea)
+            {
+                if (metresPerUv <= 0.0 || worldArea <= 1e-12 || double.IsNaN(metresPerUv)
+                    || double.IsInfinity(metresPerUv)) return;
+                double log = System.Math.Log(metresPerUv, 2.0);
+                double normalized = (log - MinimumLog2) / (MaximumLog2 - MinimumLog2);
+                int bin = Mathf.Clamp((int)System.Math.Floor(normalized * BinCount), 0, BinCount - 1);
+                weights[bin] += worldArea;
+                totalWeight += worldArea;
+            }
+
+            public float Median()
+            {
+                if (totalWeight <= 1e-12) return -1f;
+                double target = totalWeight * 0.5;
+                double cumulative = 0.0;
+                for (int i = 0; i < weights.Length; i++)
+                {
+                    cumulative += weights[i];
+                    if (cumulative < target) continue;
+                    double log = MinimumLog2 + (i + 0.5) / BinCount * (MaximumLog2 - MinimumLog2);
+                    return (float)System.Math.Pow(2.0, log);
+                }
+                return -1f;
+            }
+        }
+
+        static Vector2 UvWorldScale(Part part, Texture sourceTexture)
+        {
+            if (part == null) return new Vector2(-1f, -1f);
+            Texture source = Original(sourceTexture);
+            int sourceId = source != null ? source.GetInstanceID() : 0;
+            int materialSignature = MaterialUvSignature(part, source);
+            string key = part.GetInstanceID().ToString(CultureInfo.InvariantCulture) + "|"
+                + GeometrySignature(part).ToString(CultureInfo.InvariantCulture) + "|"
+                + sourceId.ToString(CultureInfo.InvariantCulture) + "|"
+                + materialSignature.ToString(CultureInfo.InvariantCulture);
+            Vector2 cached;
             if (uvScaleCache.TryGetValue(key, out cached)) return cached;
-            float result = -1f;
+
+            Vector2 result = new Vector2(-1f, -1f);
             try
             {
-                double sumW = 0.0, sumU = 0.0;
-                List<Renderer> rs = PartRenderers(part);
-                for (int i = 0; i < rs.Count; i++)
+                UvScaleHistogram uHistogram = new UvScaleHistogram();
+                UvScaleHistogram vHistogram = new UvScaleHistogram();
+                List<Renderer> renderers = PartRenderers(part);
+                for (int i = 0; i < renderers.Count; i++)
+                    AddMaterialScaleSamples(renderers[i], source, uHistogram, vHistogram);
+                result = new Vector2(uHistogram.Median(), vHistogram.Median());
+                if (result.x <= 0f || result.y <= 0f)
                 {
-                    Renderer r = rs[i];
-                    if (r == null) continue;
-                    MeshFilter mf = r.GetComponent<MeshFilter>();
-                    if (mf == null || mf.sharedMesh == null || !mf.sharedMesh.isReadable) continue;
-                    Mesh m = mf.sharedMesh;
-                    Vector3[] vs = m.vertices;
-                    Vector2[] uv = m.uv;
-                    if (uv == null || vs == null || uv.Length != vs.Length) continue;
-                    Matrix4x4 l2w = r.localToWorldMatrix;
-                    int[] tr = m.triangles;
-                    for (int t = 0; t + 2 < tr.Length; t += 3)
-                    {
-                        int a = tr[t], b = tr[t + 1], c = tr[t + 2];
-                        Vector3 wa = l2w.MultiplyPoint3x4(vs[a]);
-                        Vector3 wb = l2w.MultiplyPoint3x4(vs[b]);
-                        Vector3 wc = l2w.MultiplyPoint3x4(vs[c]);
-                        sumW += Vector3.Cross(wb - wa, wc - wa).magnitude * 0.5;
-                        Vector2 ua = uv[a], ub = uv[b], uc = uv[c];
-                        sumU += System.Math.Abs((ub.x - ua.x) * (uc.y - ua.y) - (uc.x - ua.x) * (ub.y - ua.y)) * 0.5;
-                    }
+                    float fallback = WholePartUvWorldScale(renderers);
+                    result = new Vector2(fallback, fallback);
                 }
-                if (sumU > 1e-6 && sumW > 1e-9) result = (float)System.Math.Sqrt(sumW / sumU);
             }
-            catch { result = -1f; }
+            catch { result = new Vector2(-1f, -1f); }
             uvScaleCache[key] = result;
             return result;
+        }
+
+        static int MaterialUvSignature(Part part, Texture source)
+        {
+            unchecked
+            {
+                int hash = 17;
+                List<Renderer> renderers = PartRenderers(part);
+                for (int i = 0; i < renderers.Count; i++)
+                {
+                    Material[] materials = renderers[i] != null ? renderers[i].sharedMaterials : null;
+                    if (materials == null) continue;
+                    for (int slot = 0; slot < materials.Length; slot++)
+                    {
+                        Material material = materials[slot];
+                        if (!MaterialUsesTexture(material, source)) continue;
+                        Vector2 scale = material.GetTextureScale("_MainTex");
+                        // Renderer order is stable within one part definition. Do not use Unity
+                        // instance IDs here or identical symmetry parts would lose bake sharing.
+                        hash = hash * 31 + i;
+                        hash = hash * 31 + slot;
+                        hash = hash * 31 + Mathf.RoundToInt(scale.x * 10000f);
+                        hash = hash * 31 + Mathf.RoundToInt(scale.y * 10000f);
+                    }
+                }
+                return hash;
+            }
+        }
+
+        static void AddMaterialScaleSamples(Renderer renderer, Texture source,
+            UvScaleHistogram uHistogram, UvScaleHistogram vHistogram)
+        {
+            if (renderer == null || source == null) return;
+            Mesh mesh = RendererMesh(renderer);
+            if (mesh == null || !mesh.isReadable) return;
+            Vector3[] vertices = mesh.vertices;
+            Vector2[] uvs = mesh.uv;
+            if (vertices == null || uvs == null || vertices.Length == 0 || uvs.Length != vertices.Length) return;
+            Material[] materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0) return;
+            Matrix4x4 localToWorld = renderer.localToWorldMatrix;
+            int submeshCount = mesh.subMeshCount;
+            for (int submesh = 0; submesh < submeshCount; submesh++)
+            {
+                Material material = materials[Mathf.Min(submesh, materials.Length - 1)];
+                if (!MaterialUsesTexture(material, source)) continue;
+                Vector2 textureScale = material.GetTextureScale("_MainTex");
+                if (System.Math.Abs(textureScale.x) <= 1e-9 || System.Math.Abs(textureScale.y) <= 1e-9) continue;
+                int[] triangles = mesh.GetTriangles(submesh);
+                for (int t = 0; t + 2 < triangles.Length; t += 3)
+                {
+                    int a = triangles[t], b = triangles[t + 1], c = triangles[t + 2];
+                    if (a < 0 || b < 0 || c < 0 || a >= vertices.Length
+                        || b >= vertices.Length || c >= vertices.Length) continue;
+                    Vector3 wa = localToWorld.MultiplyPoint3x4(vertices[a]);
+                    Vector3 wb = localToWorld.MultiplyPoint3x4(vertices[b]);
+                    Vector3 wc = localToWorld.MultiplyPoint3x4(vertices[c]);
+                    double worldArea = Vector3.Cross(wb - wa, wc - wa).magnitude * 0.5;
+                    Vector2 ua = uvs[a], ub = uvs[b], uc = uvs[c];
+                    double du1 = (ub.x - ua.x) * textureScale.x;
+                    double dv1 = (ub.y - ua.y) * textureScale.y;
+                    double du2 = (uc.x - ua.x) * textureScale.x;
+                    double dv2 = (uc.y - ua.y) * textureScale.y;
+                    double determinant = du1 * dv2 - du2 * dv1;
+                    if (worldArea <= 1e-10 || System.Math.Abs(determinant) <= 1e-10) continue;
+                    Vector3 edge1 = wb - wa;
+                    Vector3 edge2 = wc - wa;
+                    Vector3 worldPerU = (edge1 * (float)dv2 - edge2 * (float)dv1) / (float)determinant;
+                    Vector3 worldPerV = (-edge1 * (float)du2 + edge2 * (float)du1) / (float)determinant;
+                    uHistogram.Add(worldPerU.magnitude, worldArea);
+                    vHistogram.Add(worldPerV.magnitude, worldArea);
+                }
+            }
+        }
+
+        static Mesh RendererMesh(Renderer renderer)
+        {
+            MeshFilter filter = renderer.GetComponent<MeshFilter>();
+            if (filter != null) return filter.sharedMesh;
+            SkinnedMeshRenderer skinned = renderer as SkinnedMeshRenderer;
+            return skinned != null ? skinned.sharedMesh : null;
+        }
+
+        static bool MaterialUsesTexture(Material material, Texture source)
+        {
+            if (material == null || source == null || !material.HasProperty("_MainTex")) return false;
+            Texture candidate = Original(material.GetTexture("_MainTex"));
+            return candidate != null && candidate.GetInstanceID() == source.GetInstanceID();
+        }
+
+        static float WholePartUvWorldScale(List<Renderer> renderers)
+        {
+            double sumWorld = 0.0, sumUv = 0.0;
+            for (int i = 0; i < renderers.Count; i++)
+            {
+                Renderer renderer = renderers[i];
+                Mesh mesh = RendererMesh(renderer);
+                if (mesh == null || !mesh.isReadable) continue;
+                Vector3[] vertices = mesh.vertices;
+                Vector2[] uvs = mesh.uv;
+                if (vertices == null || uvs == null || uvs.Length != vertices.Length) continue;
+                Matrix4x4 localToWorld = renderer.localToWorldMatrix;
+                int[] triangles = mesh.triangles;
+                for (int t = 0; t + 2 < triangles.Length; t += 3)
+                {
+                    int a = triangles[t], b = triangles[t + 1], c = triangles[t + 2];
+                    Vector3 wa = localToWorld.MultiplyPoint3x4(vertices[a]);
+                    Vector3 wb = localToWorld.MultiplyPoint3x4(vertices[b]);
+                    Vector3 wc = localToWorld.MultiplyPoint3x4(vertices[c]);
+                    sumWorld += Vector3.Cross(wb - wa, wc - wa).magnitude * 0.5;
+                    Vector2 ua = uvs[a], ub = uvs[b], uc = uvs[c];
+                    sumUv += System.Math.Abs((ub.x - ua.x) * (uc.y - ua.y)
+                        - (uc.x - ua.x) * (ub.y - ua.y)) * 0.5;
+                }
+            }
+            return sumUv > 1e-6 && sumWorld > 1e-9
+                ? (float)System.Math.Sqrt(sumWorld / sumUv) : -1f;
         }
 
         static float PartMaxDimension(Part part)
@@ -3937,6 +4539,17 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             float threshold = Mathf.Cos(Mathf.Clamp(wrap, 0, 180) * Mathf.Deg2Rad);
             float dot = Vector3.Dot(localNormal.normalized, dir);
             return Smooth(threshold - 0.04f, threshold + 0.04f, dot);
+        }
+        internal static bool RegionFacingPlane(string tok,out Vector3 direction,out float threshold)
+        {
+            direction=Vector3.zero;threshold=0;
+            if(string.IsNullOrEmpty(tok) || tok[0]!='v')return false;
+            string[] fields=tok.Substring(1).Split('_');int enabled,wrap;
+            if(fields.Length<8 || !int.TryParse(fields[6],out enabled) || enabled==0)return false;
+            if(!int.TryParse(fields[7],out wrap))wrap=82;
+            float cut,fade,height;
+            if(!RegionAxisDir(tok,out direction,out cut,out fade,out height))return false;
+            threshold=Mathf.Cos(Mathf.Clamp(wrap,0,180)*Mathf.Deg2Rad);return true;
         }
 
         static bool ParseRegion(string tok, out float ang, out float cut, out float fade)
@@ -4448,6 +5061,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             lastBake.Clear(); lastOrder.Clear(); masks.Clear();
             origPixC.Clear(); origWC.Clear(); origHC.Clear(); origOrder.Clear();
             winMaskC.Clear(); winMaskWC.Clear(); winMaskHC.Clear();
+            uvScaleCache.Clear();
             lastSweepCount = 0;
 
         }
@@ -4470,23 +5084,242 @@ namespace HeatTileOverlayPrototype.ReforgedCore
             blitCopies[orig.GetInstanceID()] = t;
             return t;
         }
-        static int MaskHash(float[] m)
+        static ulong MaskHash(float[] m)
         {
-            int h = 17;
-            for (int i = 0; i < m.Length; i += 13) h = h * 31 + (int)(m[i] * 255f);
-            return h;
+            unchecked
+            {
+                ulong h = 14695981039346656037UL ^ (uint)m.Length;
+                for (int i = 0; i < m.Length; i++)
+                {
+                    uint bits = (uint)m[i].GetHashCode();
+                    for (int b = 0; b < 4; b++)
+                    {
+                        h = (h ^ (byte)bits) * 1099511628211UL;
+                        bits >>= 8;
+                    }
+                }
+                return h;
+            }
         }
+
+        static float FoldPattern(float coordinate, bool flip)
+        {
+            int tile = Mathf.FloorToInt(coordinate);
+            float fraction = coordinate - tile;
+            if ((tile & 1) != 0) fraction = 1f - fraction;
+            return flip ? 1f - fraction : fraction;
+        }
+
+        static Color32 SampleProjected(Color32[] pixels, int width, int height,
+            float u, float v, int entry)
+        {
+            float fu = FoldPattern(u + entry * 0.41f, (entry & 1) != 0);
+            float fv = FoldPattern(v + entry * 0.29f, (entry & 2) != 0);
+            int x = Mathf.Clamp(Mathf.RoundToInt(fu * (width - 1)), 0, width - 1);
+            int y = Mathf.Clamp(Mathf.RoundToInt(fv * (height - 1)), 0, height - 1);
+            return pixels[y * width + x];
+        }
+
+        static Vector2 ProjectedCoordinate(BakeProjection projection, Vector3 position, int axis,
+            float spanU, float spanV)
+        {
+            if (projection != null && projection.HasBasis)
+                return new Vector2(Vector3.Dot(position, projection.BasisU) / spanU,
+                    Vector3.Dot(position, projection.BasisV) / spanV);
+            if (axis == 1) return new Vector2(position.x / spanU, position.z / spanV);
+            if (axis == 0) return new Vector2(position.z / spanU, position.y / spanV);
+            return new Vector2(position.x / spanU, position.y / spanV);
+        }
+
+        static bool ProjectionData(BakeProjection projection, out IList<Vector3> vertices,
+            out IList<Vector2> uvs, out IList<int> triangles)
+        {
+            vertices = projection != null ? projection.Vertices : null;
+            uvs = projection != null ? projection.Uvs : null;
+            triangles = projection != null ? projection.Triangles : null;
+            try
+            {
+                if (projection == null || !projection.Usable) return false;
+                if (vertices == null) vertices = projection.Mesh.vertices;
+                if (uvs == null) uvs = projection.Mesh.uv;
+                if (triangles == null)
+                {
+                    int submesh = Mathf.Clamp(projection.Submesh, 0, projection.Mesh.subMeshCount - 1);
+                    triangles = projection.Mesh.GetTriangles(submesh);
+                }
+                return vertices != null && uvs != null && triangles != null
+                    && vertices.Count > 0 && uvs.Count == vertices.Count && triangles.Count >= 3;
+            }
+            catch { return false; }
+        }
+
+        static bool RasterProjectedTriangle(BakeProjection projection, IList<Vector3> vertices,
+            IList<Vector2> uvs, int ia, int ib, int ic, Vector2 a, Vector2 b, Vector2 c,
+            int width, int height, Color32[] main, Color32[] bump, Color32[] overlay,
+            int overlayWidth, int overlayHeight, Color32[] overlayNormal, int normalWidth,
+            int normalHeight, byte[] weights, byte[] touched, float strength, float relief,
+            float spanU, float spanV, int entry, bool emboss)
+        {
+            float denominator = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+            if (Mathf.Abs(denominator) <= 1e-10f) return false;
+            int minX = Mathf.Clamp(Mathf.FloorToInt(Mathf.Min(a.x, Mathf.Min(b.x, c.x)) * width), 0, width - 1);
+            int maxX = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(a.x, Mathf.Max(b.x, c.x)) * width) - 1, 0, width - 1);
+            int minY = Mathf.Clamp(Mathf.FloorToInt(Mathf.Min(a.y, Mathf.Min(b.y, c.y)) * height), 0, height - 1);
+            int maxY = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(a.y, Mathf.Max(b.y, c.y)) * height) - 1, 0, height - 1);
+            if (maxX < minX || maxY < minY) return false;
+
+            Vector3 pa = projection.ToPart.MultiplyPoint3x4(vertices[ia]);
+            Vector3 pb = projection.ToPart.MultiplyPoint3x4(vertices[ib]);
+            Vector3 pc = projection.ToPart.MultiplyPoint3x4(vertices[ic]);
+            Vector3 faceNormal = Vector3.Cross(pb - pa, pc - pa).normalized;
+            float nx = Mathf.Abs(faceNormal.x), ny = Mathf.Abs(faceNormal.y), nz = Mathf.Abs(faceNormal.z);
+            int axis = ny >= nx && ny >= nz ? 1 : (nx >= nz ? 0 : 2);
+            float inv = 1f / denominator;
+            float s255 = strength / 255f;
+            const float inv255 = 1f / 255f;
+            bool wrote = false;
+            for (int y = minY; y <= maxY; y++)
+            {
+                float py = (y + 0.5f) / height;
+                int row = y * width;
+                for (int x = minX; x <= maxX; x++)
+                {
+                    int index = row + x;
+                    if (touched[index] != 0) continue;
+                    float px = (x + 0.5f) / width;
+                    float wa = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) * inv;
+                    float wb = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) * inv;
+                    float wc = 1f - wa - wb;
+                    if (wa < -0.0001f || wb < -0.0001f || wc < -0.0001f) continue;
+                    Vector3 position = pa * wa + pb * wb + pc * wc;
+                    Vector2 pattern = ProjectedCoordinate(projection, position, axis, spanU, spanV);
+                    Color32 over = SampleProjected(overlay, overlayWidth, overlayHeight,
+                        pattern.x, pattern.y, entry);
+                    if (over.a == 0 && overlayNormal == null) continue;
+                    float alpha = over.a * s255;
+                    if (alpha > 0.95f) alpha = 0.95f;
+                    if (weights != null) alpha *= weights[index] * inv255;
+                    if (alpha <= 0.004f) continue;
+                    touched[index] = 1;
+                    if (overlayNormal != null && bump != null)
+                    {
+                        Color32 on = SampleProjected(overlayNormal, normalWidth, normalHeight,
+                            pattern.x, pattern.y, entry);
+                        Color32 nb = bump[index];
+                        float normalAlpha = alpha * relief;
+                        bump[index] = new Color32(
+                            (byte)(nb.r + (on.r - nb.r) * normalAlpha),
+                            (byte)(nb.g + (on.g - nb.g) * normalAlpha),
+                            (byte)(nb.b + (on.b - nb.b) * normalAlpha),
+                            (byte)(nb.a + (on.a - nb.a) * normalAlpha));
+                    }
+                    Color32 original = main[index];
+                    if (emboss)
+                    {
+                        int nr = original.r + (int)((original.r * over.r / 128 - original.r) * alpha);
+                        int ng = original.g + (int)((original.g * over.g / 128 - original.g) * alpha);
+                        int nb = original.b + (int)((original.b * over.b / 128 - original.b) * alpha);
+                        main[index] = new Color32(
+                            (byte)Mathf.Clamp(nr, 0, 255), (byte)Mathf.Clamp(ng, 0, 255),
+                            (byte)Mathf.Clamp(nb, 0, 255), original.a);
+                    }
+                    else
+                    {
+                        main[index] = new Color32(
+                            (byte)(original.r + (over.r - original.r) * alpha),
+                            (byte)(original.g + (over.g - original.g) * alpha),
+                            (byte)(original.b + (over.b - original.b) * alpha), original.a);
+                    }
+                    wrote = true;
+                }
+            }
+            return wrote;
+        }
+
+        static bool ApplyProjectedLayer(BakeProjection projection, int width, int height,
+            Color32[] main, Color32[] bump, Color32[] overlay, int overlayWidth, int overlayHeight,
+            Color32[] overlayNormal, int normalWidth, int normalHeight, byte[] weights,
+            float strength, float relief, float spanU, float spanV, int entry, bool emboss,
+            byte[] touched)
+        {
+            IList<Vector3> vertices; IList<Vector2> uvs; IList<int> triangles;
+            if (!ProjectionData(projection, out vertices, out uvs, out triangles)) return false;
+            if (touched == null || touched.Length != width * height) return false;
+            bool wrote = false;
+            bool repeat = projection.WrapMode != TextureWrapMode.Clamp;
+            Vector2 scale = projection.TextureScale;
+            Vector2 offset = projection.TextureOffset;
+            for (int t = 0; t + 2 < triangles.Count; t += 3)
+            {
+                int ia = triangles[t], ib = triangles[t + 1], ic = triangles[t + 2];
+                if (ia < 0 || ib < 0 || ic < 0 || ia >= vertices.Count || ib >= vertices.Count
+                    || ic >= vertices.Count) continue;
+                Vector2 a = Vector2.Scale(uvs[ia], scale) + offset;
+                Vector2 b = Vector2.Scale(uvs[ib], scale) + offset;
+                Vector2 c = Vector2.Scale(uvs[ic], scale) + offset;
+                bool outsideUnit = a.x < 0f || a.x > 1f || a.y < 0f || a.y > 1f
+                    || b.x < 0f || b.x > 1f || b.y < 0f || b.y > 1f
+                    || c.x < 0f || c.x > 1f || c.y < 0f || c.y > 1f;
+                if (repeat && outsideUnit)
+                {
+                    int shiftMinX = Mathf.CeilToInt(-Mathf.Max(a.x, Mathf.Max(b.x, c.x)));
+                    int shiftMaxX = Mathf.FloorToInt(1f - Mathf.Min(a.x, Mathf.Min(b.x, c.x)));
+                    int shiftMinY = Mathf.CeilToInt(-Mathf.Max(a.y, Mathf.Max(b.y, c.y)));
+                    int shiftMaxY = Mathf.FloorToInt(1f - Mathf.Min(a.y, Mathf.Min(b.y, c.y)));
+                    if (shiftMaxX - shiftMinX > 16 || shiftMaxY - shiftMinY > 16) continue;
+                    for (int sy = shiftMinY; sy <= shiftMaxY; sy++)
+                        for (int sx = shiftMinX; sx <= shiftMaxX; sx++)
+                        {
+                            Vector2 shift = new Vector2(sx, sy);
+                            wrote |= RasterProjectedTriangle(projection, vertices, uvs, ia, ib, ic,
+                                a + shift, b + shift, c + shift, width, height, main, bump, overlay,
+                                overlayWidth, overlayHeight, overlayNormal, normalWidth, normalHeight,
+                                weights, touched, strength, relief, spanU, spanV, entry, emboss);
+                        }
+                }
+                else if (!repeat)
+                {
+                    a = new Vector2(Mathf.Clamp01(a.x), Mathf.Clamp01(a.y));
+                    b = new Vector2(Mathf.Clamp01(b.x), Mathf.Clamp01(b.y));
+                    c = new Vector2(Mathf.Clamp01(c.x), Mathf.Clamp01(c.y));
+                    wrote |= RasterProjectedTriangle(projection, vertices, uvs, ia, ib, ic, a, b, c,
+                        width, height, main, bump, overlay, overlayWidth, overlayHeight, overlayNormal,
+                        normalWidth, normalHeight, weights, touched, strength, relief, spanU, spanV,
+                        entry, emboss);
+                }
+                else
+                {
+                    wrote |= RasterProjectedTriangle(projection, vertices, uvs, ia, ib, ic, a, b, c,
+                        width, height, main, bump, overlay, overlayWidth, overlayHeight, overlayNormal,
+                        normalWidth, normalHeight, weights, touched, strength, relief, spanU, spanV,
+                        entry, emboss);
+                }
+            }
+            return wrote;
+        }
+
         public static Texture Baked(Texture orig, Texture origBump, string stackSpec, Part part, float patScale, out Texture bumpOut)
-        { return Baked(orig, origBump, stackSpec, part, patScale, out bumpOut, null); }
+        { return Baked(orig, origBump, stackSpec, part, patScale, out bumpOut, null, null); }
         public static Texture Baked(Texture orig, Texture origBump, string stackSpec, Part part, float patScale, out Texture bumpOut, float[] maskOverride)
+        { return Baked(orig, origBump, stackSpec, part, patScale, out bumpOut, maskOverride, null); }
+        public static Texture Baked(Texture orig, Texture origBump, string stackSpec, Part part, float patScale, out Texture bumpOut, BakeProjection projection)
+        { return Baked(orig, origBump, stackSpec, part, patScale, out bumpOut, null, projection); }
+        public static Texture Baked(Texture orig, Texture origBump, string stackSpec, Part part, float patScale, out Texture bumpOut, float[] maskOverride, BakeProjection projection)
         {
             bumpOut = null;
-            if (patScale <= 0.01f || float.IsNaN(patScale)) patScale = 1f;
+            if (patScale <= 0.01f || float.IsNaN(patScale) || float.IsInfinity(patScale)) patScale = 1f;
             if (orig == null) return null;
             if (string.IsNullOrEmpty(stackSpec)) return orig;
             string pname = (part != null) ? ((part.partInfo != null) ? part.partInfo.name : part.name) : "?";
-            string key = orig.GetInstanceID() + "|" + stackSpec + "|" + pname + "|s" + patScale.ToString("0.00");
+            string inputKey = "|n" + (origBump == null ? 0 : origBump.GetInstanceID())
+                + "|s" + patScale.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            string key = orig.GetInstanceID() + "|" + stackSpec + "|" + pname + inputKey;
             if (part != null && HasPlacedLayer(stackSpec)) key += "|g" + GeometrySignature(part);
+            if (part != null && HasWorldScaledLayer(stackSpec)
+                && (projection == null || !projection.Usable))
+                key += "|u" + GeometrySignature(part) + "_" + MaterialUvSignature(part, Original(orig));
+            if (projection != null && projection.Usable) key += "|p" + projection.Signature
+                + (part != null ? "_g" + GeometrySignature(part) : "");
             if (maskOverride != null) key += "|k" + MaskHash(maskOverride);
             Texture2D t;
             if (baked.TryGetValue(key, out t))
@@ -4521,9 +5354,15 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     if (GetOverlayPixels(f2[0] + "_n", out tst, out tw, out th)) { wantBump = true; break; }
                 }
 
-                string memKey = orig.GetInstanceID() + "|" + pname + "|s" + patScale.ToString("0.00");
+                string memKey = orig.GetInstanceID() + "|" + pname + inputKey;
+                if (maskOverride != null) memKey += "|k" + MaskHash(maskOverride);
                 if (part != null && HasPlacedLayer(stackSpec))
                     memKey += "|g" + GeometrySignature(part);
+                if (part != null && HasWorldScaledLayer(stackSpec)
+                    && (projection == null || !projection.Usable))
+                    memKey += "|u" + GeometrySignature(part) + "_" + MaterialUvSignature(part, Original(orig));
+                if (projection != null && projection.Usable) memKey += "|p" + projection.Signature
+                    + (part != null ? "_g" + GeometrySignature(part) : "");
                 Color32[] bp = null, nbase = null;
                 int firstEntry = 0;
                 BakeMem bm;
@@ -4576,8 +5415,10 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 }
 
                 float dim = PartMaxDimension(part);
-                float wpu = UvWorldScale(part);
-                float tileBasis = (wpu > 0f) ? wpu : dim;
+                Vector2 worldPerUv = projection != null && projection.Usable
+                    ? new Vector2(-1f, -1f) : UvWorldScale(part, orig);
+                float tileBasisU = worldPerUv.x > 0f ? worldPerUv.x : dim;
+                float tileBasisV = worldPerUv.y > 0f ? worldPerUv.y : dim;
                 int hsh = pname.GetHashCode();
                 float partU = ((hsh >> 2) & 0x3FF) / 1024f;
                 float partV = ((hsh >> 12) & 0x3FF) / 1024f;
@@ -4586,6 +5427,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                 float[] colF = new float[w];
                 float[] rowF = new float[h];
                 byte[] wgtBuf = null;
+                byte[] projectedTouched = null;
 
                 for (int e = firstEntry; e < entries.Length; e++)
                 {
@@ -4609,13 +5451,17 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     bool isEmboss = name.StartsWith("grain");
                     float[] mask = (place == "whole") ? null : (maskOverride != null ? maskOverride : GetMask(part, place));
                     bool uvFB = (mask == null && place != "whole");
-                    float strengthMul = (lvl <= 5) ? ((lvl >= 2) ? 2.5f : 0.6f) : lvl / 100f;
+                    float strengthMul = StackStrength(lvl);
                     float strength = strengthMul * PatternStrength(name);
-                    int tiles = 1;
+                    int tilesU = 1, tilesV = 1;
+                    float projectedSpanU = TileMeters(name) * patScale;
+                    float projectedSpanV = projectedSpanU * (ow > 0 ? oh / (float)ow : 1f);
                     if (WorldScaled(name))
                     {
-                        tiles = Mathf.Clamp(Mathf.RoundToInt(tileBasis / (TileMeters(name) * patScale)), 1, 24);
-                        while (tiles > 1 && w / tiles < 160) tiles--;
+                        tilesU = Mathf.Clamp(Mathf.RoundToInt(tileBasisU / Mathf.Max(0.05f, projectedSpanU)), 1, 24);
+                        tilesV = Mathf.Clamp(Mathf.RoundToInt(tileBasisV / Mathf.Max(0.05f, projectedSpanV)), 1, 24);
+                        while (tilesU > 1 && w / tilesU < 160) tilesU--;
+                        while (tilesV > 1 && h / tilesV < 160) tilesV--;
                     }
 
                     bool eFlipX = flipX ^ ((e & 1) == 1);
@@ -4623,7 +5469,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     float uShift = partU * 3f + e * 0.41f;
                     for (int x = 0; x < w; x++)
                     {
-                        float su = (x + 0.5f) / w * tiles + uShift;
+                        float su = (x + 0.5f) / w * tilesU + uShift;
                         int txi = Mathf.FloorToInt(su);
                         float fu = su - txi;
                         if ((txi & 1) == 1) fu = 1f - fu;
@@ -4632,7 +5478,7 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     }
                     for (int y = 0; y < h; y++)
                     {
-                        float sv = (y + 0.5f) / h * tiles + partV * 3f + e * 0.29f;
+                        float sv = (y + 0.5f) / h * tilesV + partV * 3f + e * 0.29f;
                         int tyi = Mathf.FloorToInt(sv);
                         float fv = sv - tyi;
                         if ((tyi & 1) == 1) fv = 1f - fv;
@@ -4684,6 +5530,16 @@ namespace HeatTileOverlayPrototype.ReforgedCore
                     else if (name.StartsWith("tiles")) reliefMul = 0.85f;
                     else if (DeepRelief.Contains(rbn)) reliefMul = 0.74f;
                     else reliefMul = 0.52f;
+                    if (!isTint && WorldScaled(name) && projection != null && projection.Usable)
+                    {
+                        if (projectedTouched == null) projectedTouched = new byte[w * h];
+                        else Array.Clear(projectedTouched, 0, projectedTouched.Length);
+                        if (ApplyProjectedLayer(projection, w, h, bp, nbase, ov, ow, oh, ovn,
+                            ownw, ownh, wgt, strength, reliefMul,
+                            Mathf.Max(0.05f, projectedSpanU), Mathf.Max(0.05f, projectedSpanV), e,
+                            isEmboss, projectedTouched))
+                            continue;
+                    }
                     ForRows(h, w * h >= ParMinPixels, delegate(int y)
                     {
                         int rowOff = y * w;

@@ -28,6 +28,10 @@ $arguments = @(
     "/reference:$(Join-Path $managed 'UnityEngine.UI.dll')"
     "/reference:$(Join-Path $managed 'UnityEngine.UIModule.dll')"
     (Join-Path $projectRoot 'Source\AssemblyInfo.cs')
+    (Join-Path $projectRoot 'Source\ThermalProtectionPolicy.cs')
+    (Join-Path $projectRoot 'Source\ExteriorPaintPolicy.cs')
+    (Join-Path $projectRoot 'Source\UvPaintPartition.cs')
+    (Join-Path $projectRoot 'Source\ImageImportPolicy.cs')
     (Join-Path $projectRoot 'Source\HeatTileTextureLibrary.cs')
     (Join-Path $projectRoot 'Source\ReforgedBackend.cs')
     (Join-Path $projectRoot 'Source\ModuleHeatTileOverlay.cs')

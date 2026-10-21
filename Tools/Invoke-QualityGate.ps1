@@ -15,8 +15,12 @@ try {
     & (Join-Path $projectRoot 'Tools\Test-ReforgedCoreInvariants.ps1')
     & (Join-Path $projectRoot 'Tools\Test-EventDelegate.ps1')
     & (Join-Path $projectRoot 'Tools\Test-PrecisionAndThermalContracts.ps1')
+    & (Join-Path $projectRoot 'Tools\Test-ThermalBehavior.ps1')
+    & (Join-Path $projectRoot 'Tools\Test-AuditBehavior.ps1')
+    & (Join-Path $projectRoot 'Tools\Test-ImportAndUvBehavior.ps1')
     & (Join-Path $projectRoot 'Tools\Test-UiRefinementContracts.ps1')
     & (Join-Path $projectRoot 'Tools\Test-FinalOptimizationContracts.ps1')
+    & (Join-Path $projectRoot 'Tools\Test-TextureLibraryAndScalingContracts.ps1')
 
     Write-Output 'Heat Tile Painter deterministic quality gate passed.'
     Write-Output 'In-game verification may still be required by the active spec.'

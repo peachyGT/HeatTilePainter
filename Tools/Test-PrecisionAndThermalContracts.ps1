@@ -66,11 +66,13 @@ $layerType = $assembly.GetType('HeatTileOverlayPrototype.HeatTileLayerState', $t
 $layer = [Activator]::CreateInstance($layerType)
 $layerType.GetField('Coverage').SetValue($layer, [single]35)
 $layerType.GetField('PlaneOffset').SetValue($layer, [single]2.5)
+$layerType.GetField('PatternScale').SetValue($layer, [single]1.75)
 $serializer = $moduleType.GetMethod('SerializeLayer',
     [Reflection.BindingFlags]'NonPublic,Static')
 $record = [string]$serializer.Invoke($null, @($layer))
-if ($record.Split('|').Length -ne 19 -or $record.Split('|')[-1] -ne '2.5') {
-    throw "Compiled layer serialization is not the expected 19-field append: $record"
+if ($record.Split('|').Length -ne 20 -or $record.Split('|')[-2] -ne '2.5' -or
+    $record.Split('|')[-1] -ne '1.75') {
+    throw "Compiled layer serialization is not the expected backward-compatible 20-field append: $record"
 }
 $effectiveCut = [single]$moduleType.GetMethod('EffectiveCutPercent').Invoke($null, @($layer))
 if ([Math]::Abs($effectiveCut - 67.5) -gt 0.0001) {

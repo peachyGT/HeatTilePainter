@@ -24,6 +24,7 @@ namespace HeatTileOverlayPrototype
         public int MirrorAxis;
         public bool IsolateOpacity;
         public float PlaneOffset;
+        public float PatternScale = 1f;
 
         public HeatTileLayerState Clone()
         {
@@ -43,7 +44,8 @@ namespace HeatTileOverlayPrototype
                 MirrorMode = MirrorMode,
                 MirrorAxis = MirrorAxis,
                 IsolateOpacity = IsolateOpacity,
-                PlaneOffset = PlaneOffset
+                PlaneOffset = PlaneOffset,
+                PatternScale = PatternScale
             };
         }
     }
@@ -79,6 +81,7 @@ namespace HeatTileOverlayPrototype
         // cannot silently add a second paint target or change the coverage plane after launch.
         [KSPField(isPersistant = true)] public string sourceCalibrationData = "";
         [KSPField(isPersistant = true)] public bool thermalProtectionEnabled = false;
+        [KSPField(isPersistant = true)] public float thermalProtectionAmount = 1f;
         [KSPField] public float surfaceOffset = 0f;
 
         private const float ThermalMassFraction = 0.05f;
@@ -86,11 +89,19 @@ namespace HeatTileOverlayPrototype
         private const double SkinTemperatureMultiplier = 1.50;
         private const double InternalTemperatureCap = 3000.0;
         private const double SkinTemperatureCap = 3300.0;
+        private readonly ThermalLimitOwnership _internalThermal = new ThermalLimitOwnership();
+        private readonly ThermalLimitOwnership _skinThermal = new ThermalLimitOwnership();
+
+        public float ThermalProtectionAmount { get { return ThermalProtectionPolicy.Amount(thermalProtectionAmount); } }
+        public float ThermalMassPercent { get { return ThermalProtectionAmount * ThermalMassFraction * 100f; } }
+        public double ProtectedInternalLimit { get { return part == null ? 0 : ThermalProtectionPolicy.Limit(_internalThermal.Baseline(part.maxTemp), ThermalProtectionAmount, InternalTemperatureMultiplier, InternalTemperatureCap, 6000); } }
+        public double ProtectedSkinLimit { get { return part == null ? 0 : ThermalProtectionPolicy.Limit(_skinThermal.Baseline(part.skinMaxTemp), ThermalProtectionAmount, SkinTemperatureMultiplier, SkinTemperatureCap, 6600); } }
 
         private readonly List<HeatTileLayerState> _layers = new List<HeatTileLayerState>();
         private readonly Dictionary<string, SourceCalibration> _sourceCalibrations =
             new Dictionary<string, SourceCalibration>(StringComparer.Ordinal);
         private bool _layersInitialized;
+        private bool _runtimeStarted;
         private bool _sourceCalibrationsInitialized;
         private bool _reportedCalibrationMismatch;
         private int _rebuildAtFrame = -1;
@@ -182,6 +193,7 @@ namespace HeatTileOverlayPrototype
         public override void OnStart(StartState state)
         {
             base.OnStart(state);
+            _runtimeStarted = true;
             // KSP creates Instantly add-ons before every GameEvents channel exists. The 0.22
             // scheduler subscribed at that point, threw from Awake, and therefore never pumped
             // saved-layer restores. A live PartModule is a reliable, scene-ready bootstrap; the
@@ -194,11 +206,26 @@ namespace HeatTileOverlayPrototype
             if (_layers.Count > 0) EnqueueInitialRebuild();
         }
 
+        public override void OnLoad(ConfigNode node)
+        {
+            RestoreOwnedThermalLimits();
+            base.OnLoad(node);
+            _layersInitialized = false;
+            _sourceCalibrationsInitialized = false;
+            _sourceCalibrations.Clear();
+            if (_runtimeStarted)
+            {
+                EnsureLayers();
+                ApplyThermalProtection();
+                RequestRebuild(2);
+            }
+        }
+
         public void OnDestroy()
         {
             CancelInitialRebuild();
             CancelScheduledRebuild();
-            RestorePrefabThermalLimits();
+            RestoreOwnedThermalLimits();
             DestroyOverlay();
         }
 
@@ -445,7 +472,16 @@ namespace HeatTileOverlayPrototype
 
         public float GetModuleMass(float defaultMass, ModifierStagingSituation sit)
         {
-            return ThermalProtectionEnabled ? defaultMass * ThermalMassFraction : 0f;
+            return ThermalProtectionEnabled ? ThermalProtectionPolicy.Mass(defaultMass, ThermalProtectionAmount) : 0f;
+        }
+
+        public bool SetThermalProtectionAmount(float amount)
+        {
+            amount = ThermalProtectionPolicy.Amount(amount);
+            if (thermalProtectionAmount == amount) return false;
+            thermalProtectionAmount = amount;
+            ApplyThermalProtection();
+            return true;
         }
 
         public ModifierChangeWhen GetModuleMassChangeWhen()
@@ -598,23 +634,35 @@ namespace HeatTileOverlayPrototype
         private static HeatTileLayerState Sanitize(HeatTileLayerState source)
         {
             HeatTileLayerState state = source == null ? new HeatTileLayerState() : source.Clone();
-            state.TextureId = HeatTileTextureLibrary.Find(state.TextureId).Id;
+            HeatTileTextureDefinition installedDefinition;
+            if (HeatTileTextureLibrary.FindExact(state.TextureId, out installedDefinition))
+                state.TextureId = installedDefinition.Id;
+            else if (!HeatTileTextureLibrary.IsValidDefinitionId(state.TextureId))
+                state.TextureId = HeatTileTextureLibrary.Find("legacy_hrsi").Id;
             state.Direction = Mathf.Clamp(state.Direction, 0, 5);
+            state.CustomDirection = new Vector3(FiniteOr(state.CustomDirection.x, 0),
+                FiniteOr(state.CustomDirection.y, 0), FiniteOr(state.CustomDirection.z, 0));
             state.CustomDirection = state.CustomDirection.sqrMagnitude > 0.0001f
                 ? state.CustomDirection.normalized : DirectionVector(state.Direction);
             // Mirror intersection was never supported by the active Reforged bridge. Normalize
             // legacy mode 2 to the implemented mirrored-union behavior when state is materialized.
             state.MirrorMode = state.MirrorMode == 0 ? 0 : 1;
             state.MirrorAxis = Mathf.Clamp(state.MirrorAxis, 0, 2);
-            state.Coverage = Mathf.Clamp(state.Coverage, 0f, 100f);
-            state.PlaneOffset = Mathf.Clamp(state.PlaneOffset, -100f, 100f);
-            state.Opacity = Mathf.Clamp(state.Opacity, 0f, 100f);
+            state.Coverage = Mathf.Clamp(FiniteOr(state.Coverage, 35), 0f, 100f);
+            state.PlaneOffset = Mathf.Clamp(FiniteOr(state.PlaneOffset, 0), -100f, 100f);
+            state.PatternScale = Mathf.Clamp(FiniteOr(state.PatternScale, 1), 0.25f, 4f);
+            state.Opacity = Mathf.Clamp(FiniteOr(state.Opacity, 100), 0f, 100f);
             state.EdgeStyle = Mathf.Clamp(state.EdgeStyle, 0, 3);
             float maximumEdge = state.EdgeStyle == 1 ? 8f : (state.EdgeStyle == 2 ? 4f : (state.EdgeStyle == 3 ? 5f : 0f));
-            state.EdgeBlend = state.EdgeStyle == 0 ? 0f : Mathf.Clamp(state.EdgeBlend, 0.25f, maximumEdge);
-            state.SurfaceWrap = Mathf.Clamp(state.SurfaceWrap, 30f, 110f);
-            state.Tint = new Color(Mathf.Clamp01(state.Tint.r), Mathf.Clamp01(state.Tint.g), Mathf.Clamp01(state.Tint.b), 1f);
+            state.EdgeBlend = state.EdgeStyle == 0 ? 0f : Mathf.Clamp(FiniteOr(state.EdgeBlend, 3), 0.25f, maximumEdge);
+            state.SurfaceWrap = Mathf.Clamp(FiniteOr(state.SurfaceWrap, 82), 30f, 110f);
+            state.Tint = new Color(Mathf.Clamp01(FiniteOr(state.Tint.r, .12f)), Mathf.Clamp01(FiniteOr(state.Tint.g, .13f)), Mathf.Clamp01(FiniteOr(state.Tint.b, .14f)), 1f);
             return state;
+        }
+
+        private static float FiniteOr(float value, float fallback)
+        {
+            return float.IsNaN(value) || float.IsInfinity(value) ? fallback : value;
         }
 
         private void CommitLayers()
@@ -659,7 +707,8 @@ namespace HeatTileOverlayPrototype
                 + state.MirrorMode.ToString(CultureInfo.InvariantCulture) + "|"
                 + state.MirrorAxis.ToString(CultureInfo.InvariantCulture) + "|"
                 + (state.IsolateOpacity ? "1" : "0") + "|"
-                + state.PlaneOffset.ToString("R", CultureInfo.InvariantCulture);
+                + state.PlaneOffset.ToString("R", CultureInfo.InvariantCulture) + "|"
+                + state.PatternScale.ToString("R", CultureInfo.InvariantCulture);
         }
 
         private void DeserializeLayers(string data)
@@ -687,32 +736,28 @@ namespace HeatTileOverlayPrototype
                     MirrorMode = values.Length >= 16 ? ParseInt(values[15], 0) : 0,
                     MirrorAxis = values.Length >= 17 ? ParseInt(values[16], 0) : 0,
                     IsolateOpacity = values.Length >= 18 && values[17] != "0",
-                    PlaneOffset = values.Length >= 19 ? ParseFloat(values[18], 0f) : 0f
+                    PlaneOffset = values.Length >= 19 ? ParseFloat(values[18], 0f) : 0f,
+                    PatternScale = values.Length >= 20 ? ParseFloat(values[19], 1f) : 1f
                 }));
             }
         }
 
         private void ApplyThermalProtection()
         {
-            if (part == null || part.partInfo == null || part.partInfo.partPrefab == null) return;
-            Part prefab = part.partInfo.partPrefab;
-            if (!thermalProtectionEnabled || _layers.Count == 0)
-            {
-                part.maxTemp = prefab.maxTemp;
-                part.skinMaxTemp = prefab.skinMaxTemp;
-                return;
-            }
-            part.maxTemp = Math.Min(prefab.maxTemp * InternalTemperatureMultiplier,
-                InternalTemperatureCap);
-            part.skinMaxTemp = Math.Min(prefab.skinMaxTemp * SkinTemperatureMultiplier,
-                SkinTemperatureCap);
+            if (part == null) return;
+            thermalProtectionAmount = ThermalProtectionAmount;
+            bool enabled = thermalProtectionEnabled && _layers.Count > 0;
+            part.maxTemp = _internalThermal.Apply(part.maxTemp, enabled, thermalProtectionAmount,
+                InternalTemperatureMultiplier, InternalTemperatureCap, 6000);
+            part.skinMaxTemp = _skinThermal.Apply(part.skinMaxTemp, enabled, thermalProtectionAmount,
+                SkinTemperatureMultiplier, SkinTemperatureCap, 6600);
         }
 
-        private void RestorePrefabThermalLimits()
+        private void RestoreOwnedThermalLimits()
         {
-            if (part == null || part.partInfo == null || part.partInfo.partPrefab == null) return;
-            part.maxTemp = part.partInfo.partPrefab.maxTemp;
-            part.skinMaxTemp = part.partInfo.partPrefab.skinMaxTemp;
+            if (part == null) return;
+            part.maxTemp = _internalThermal.Apply(part.maxTemp, false, 1, 1, 0, 0);
+            part.skinMaxTemp = _skinThermal.Apply(part.skinMaxTemp, false, 1, 1, 0, 0);
         }
 
         private static int ParseInt(string value, int fallback)
@@ -724,7 +769,8 @@ namespace HeatTileOverlayPrototype
         private static float ParseFloat(string value, float fallback)
         {
             float parsed;
-            return float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed) ? parsed : fallback;
+            return float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)
+                && !float.IsNaN(parsed) && !float.IsInfinity(parsed) ? parsed : fallback;
         }
 
         private void SyncLegacyFields()
@@ -748,10 +794,10 @@ namespace HeatTileOverlayPrototype
         internal void OnEditorShipModified(ShipConstruct ship)
         {
             EnsureLayers();
-            // CommitLayers already schedules paint edits. The only unrelated editor change that
-            // needs a rebuild is a settled geometry edit on the currently selected procedural part.
+            // PAW edits need not set EditorLogic.SelectedPart. The shared ship event also
+            // covers procedural symmetry counterparts; no per-frame polling is needed.
             if (_layers.Count > 0 && IsProceduralMeshPart() && HighLogic.LoadedSceneIsEditor
-                && EditorLogic.fetch != null && EditorLogic.SelectedPart == part) RequestRebuild(3);
+                && EditorLogic.fetch != null) RequestRebuild(3);
         }
 
         private bool IsB9ProceduralPart()
@@ -815,6 +861,7 @@ namespace HeatTileOverlayPrototype
         private void RebuildOverlay()
         {
             EnsureLayers();
+            ApplyThermalProtection();
             if (_layers.Count == 0 || part == null || part.transform == null) return;
             // The bespoke UV-bake/flat-region backend is retired. Reforged's pristine/prefab
             // ownership is the only code allowed to alter materials or create a disposable split.
@@ -1138,9 +1185,11 @@ namespace HeatTileOverlayPrototype
                 if (filter == null || filter.sharedMesh == null || IsGeneratedObject(filter.transform)) continue;
                 if (filter.GetComponentInParent<Part>() != part) continue;
                 MeshRenderer renderer = filter.GetComponent<MeshRenderer>();
-                if (renderer == null || ShouldSkipRenderer(renderer) || !renderer.enabled
+                if (renderer == null || ShouldSkipRenderer(renderer)
+                    || !ExteriorPaintPolicy.AllowsRenderer(part, renderer) || !renderer.enabled
                     || !renderer.gameObject.activeInHierarchy) continue;
                 Mesh sourceMesh = filter.sharedMesh;
+                if (ReforgedCore != null) sourceMesh = ReforgedCore.PreviewSourceMesh(renderer, sourceMesh);
                 Material[] sourceMaterials = renderer.sharedMaterials;
                 if (sourceMesh == null || sourceMaterials == null || sourceMaterials.Length == 0) continue;
                 bool[] eligibleSubmeshes = FindEligibleSubmeshes(sourceMesh, sourceMaterials);
@@ -1325,7 +1374,8 @@ namespace HeatTileOverlayPrototype
             for (int i = 0; i < values.Length; i++)
             {
                 float parsed;
-                if (!float.TryParse(values[i], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+                if (!float.TryParse(values[i], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)
+                    || float.IsNaN(parsed) || float.IsInfinity(parsed))
                     return false;
                 matrix[i] = parsed;
             }
@@ -1399,8 +1449,10 @@ namespace HeatTileOverlayPrototype
                 data.EligibleSubmeshes++;
                 int[] triangles;
                 try { triangles = source.Mesh.GetTriangles(subMesh); } catch (Exception) { continue; }
+                bool[] exterior = ExteriorPaintPolicy.Triangles(part, source.Renderer, source.Mesh, subMesh);
                 for (int tri = 0; tri + 2 < triangles.Length; tri += 3)
                 {
+                    if (exterior != null && (tri / 3 >= exterior.Length || !exterior[tri / 3])) continue;
                     int ia = triangles[tri], ib = triangles[tri + 1], ic = triangles[tri + 2];
                     if (ia < 0 || ib < 0 || ic < 0 || ia >= partVertices.Length || ib >= partVertices.Length || ic >= partVertices.Length) continue;
                     Vector3 faceNormal = Vector3.Cross(partVertices[ib] - partVertices[ia], partVertices[ic] - partVertices[ia]).normalized;
@@ -1905,10 +1957,13 @@ namespace HeatTileOverlayPrototype
         private void OnEditorShipModified(ShipConstruct ship)
         {
             if (!HighLogic.LoadedSceneIsEditor || EditorLogic.fetch == null) return;
-            Part selected = EditorLogic.SelectedPart;
-            if (selected == null) return;
-            ModuleHeatTileOverlay module = selected.FindModuleImplementing<ModuleHeatTileOverlay>();
-            if (module != null) module.OnEditorShipModified(ship);
+            if (ship == null) return;
+            foreach (Part changedPart in ship.parts)
+            {
+                if (changedPart == null) continue;
+                ModuleHeatTileOverlay module = changedPart.FindModuleImplementing<ModuleHeatTileOverlay>();
+                if (module != null) module.OnEditorShipModified(ship);
+            }
         }
 
         private void OnVariantApplied(Part changedPart, PartVariant variant)

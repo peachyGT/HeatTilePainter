@@ -1,7 +1,7 @@
 Reforged Materials Redux
 ========================
 
-Heat Tile Painter 0.24.1 contains a modified, renamed fork of the material-rendering, region,
+Heat Tile Painter 0.25.0 contains a modified, renamed fork of the material-rendering, region,
 runtime albedo/normal compositing, cache, and bounded load-scheduling core from Reforged Materials
 Redux by J4COB. The upstream painter UI and persistence are not compiled. No Reforged texture
 assets are included or redistributed by Heat Tile Painter.

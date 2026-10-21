@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
 using EditorGizmos;
 using KSP.UI.Screens;
@@ -43,7 +44,7 @@ namespace HeatTileOverlayPrototype
             new GUIContent("", "Move this layer's coverage plane");
         private static readonly GUIContent RotateIconContent =
             new GUIContent("", "Rotate this layer's coverage direction");
-        private static readonly string[] EdgeLabels = { "Hard", "Soft fade", "Textured gasket", "Reinforced strip" };
+        private static readonly string[] EdgeLabels = { "Hard", "Soft fade", "Gasket (fade)", "Reinforced (fade)" };
         private const ControlTypes ToolControlMask = ControlTypes.EDITOR_PAD_PICK_PLACE
             | ControlTypes.EDITOR_PAD_PICK_COPY | ControlTypes.EDITOR_GIZMO_TOOLS | ControlTypes.EDITOR_ROOT_REFLOW;
 
@@ -80,17 +81,27 @@ namespace HeatTileOverlayPrototype
         private Vector2 _resizeStartMouse;
         private float _resizeStartHeight;
         private int _textureIndex;
+        private int _pendingTextureIndex = -1;
         private int _direction = 3;
         private Vector3 _fineDirection = Vector3.down;
         private float _planeOffset;
         private int _mirrorMode;
+        private int _pendingMirrorMode = -1;
         private int _mirrorAxis;
         private bool _isolateOpacity = true;
         private int _edgeStyle;
+        private int _pendingEdgeStyle = -1;
+        private int _pendingDirectionFacing = -1;
+        private bool _paintLayoutSnapshotValid;
+        private bool _paintLayoutFlatColor;
+        private int _paintLayoutMirrorMode;
+        private bool _paintLayoutDirectionFacing;
+        private int _paintLayoutEdgeStyle;
         private float _coverage = 35f;
         private float _opacity = 100f;
         private float _edgeBlend = 3f;
         private float _surfaceWrap = 82f;
+        private float _patternScale = 1f;
         private Color _flatColor = new Color(0.165f, 0.165f, 0.165f, 1f);
         private ApplicationLauncherButton _button;
         private GizmoRotate _directionGizmo;
@@ -111,6 +122,19 @@ namespace HeatTileOverlayPrototype
         private bool _stockMoveIconResolved;
         private bool _stockRotateIconResolved;
         private float _nextStockIconResolveTime;
+        private Rect _textureBrowserWindow = new Rect(750f, 90f, 650f, 560f);
+        private bool _textureBrowserOpen;
+        private string _textureBrowserDirectory = "";
+        private string _textureBrowserPathField = "";
+        private string _textureBrowserSelectedFile = "";
+        private string _textureBrowserError = "";
+        private string _pendingTextureImport = "";
+        private string _pendingTextureBrowserDirectory = "";
+        private string _pendingTextureBrowserSelection = "";
+        private bool _pendingTextureBrowserOpen;
+        private Vector2 _textureBrowserScroll;
+        private readonly List<string> _textureBrowserDirectories = new List<string>();
+        private readonly List<string> _textureBrowserFiles = new List<string>();
 
         private string _previewKey = "";
         private readonly List<GameObject> _previewObjects = new List<GameObject>();
@@ -131,6 +155,10 @@ namespace HeatTileOverlayPrototype
 
         public void Update()
         {
+            ProcessPendingTextureSelection();
+            ProcessPendingConditionalSettings();
+            ProcessPendingTextureBrowserNavigation();
+            ProcessPendingTextureImport();
             UpdateWindowLock();
             if (!_visible)
             {
@@ -191,8 +219,19 @@ namespace HeatTileOverlayPrototype
             GUI.skin = HighLogic.Skin;
             _windowHeight = Mathf.Clamp(_windowHeight, 430f, Screen.height - 16f);
             _window.height = _windowHeight;
-            _window = GUILayout.Window(GetInstanceID(), _window, DrawWindow, "Heat Tile Painter 0.24.1");
+            _window = GUILayout.Window(GetInstanceID(), _window, DrawWindow, "Heat Tile Painter 0.25.0");
             _window.height = _windowHeight;
+            if (_textureBrowserOpen)
+            {
+                _textureBrowserWindow.width = Mathf.Min(650f, Screen.width - 16f);
+                _textureBrowserWindow.height = Mathf.Min(560f, Screen.height - 16f);
+                _textureBrowserWindow.x = Mathf.Clamp(_textureBrowserWindow.x, 8f,
+                    Mathf.Max(8f, Screen.width - _textureBrowserWindow.width - 8f));
+                _textureBrowserWindow.y = Mathf.Clamp(_textureBrowserWindow.y, 8f,
+                    Mathf.Max(8f, Screen.height - _textureBrowserWindow.height - 8f));
+                _textureBrowserWindow = GUILayout.Window(GetInstanceID() + 137, _textureBrowserWindow,
+                    DrawTextureBrowserWindow, "Add custom paint texture");
+            }
         }
 
         public void OnDestroy()
@@ -234,6 +273,15 @@ namespace HeatTileOverlayPrototype
             InputLockManager.RemoveControlLock(WindowLockId);
             _selectedPart = null;
             _selectedLayer = -1;
+            _textureBrowserOpen = false;
+            _pendingTextureImport = "";
+            _pendingTextureBrowserDirectory = "";
+            _pendingTextureBrowserSelection = "";
+            _pendingTextureBrowserOpen = false;
+            _pendingTextureIndex = -1;
+            _pendingMirrorMode = -1;
+            _pendingDirectionFacing = -1;
+            _pendingEdgeStyle = -1;
         }
 
         private void DrawWindow(int id)
@@ -283,23 +331,38 @@ namespace HeatTileOverlayPrototype
             string[] names = new string[definitions.Count];
             for (int i = 0; i < definitions.Count; i++) names[i] = definitions[i].DisplayName;
             int previousTexture = Mathf.Clamp(_textureIndex, 0, names.Length - 1);
-            _textureIndex = GUILayout.SelectionGrid(previousTexture, names, 1);
-            HeatTileTextureDefinition selectedTexture = definitions[Mathf.Clamp(_textureIndex, 0, definitions.Count - 1)];
-            if (_textureIndex != previousTexture && selectedTexture.IsFlatColor) _flatColor = selectedTexture.DefaultColor;
-            if (selectedTexture.IsFlatColor) DrawFlatColorControls();
+            HeatTileTextureDefinition displayedTexture = definitions[previousTexture];
+            if (Event.current.type == EventType.Layout || !_paintLayoutSnapshotValid)
+            {
+                _paintLayoutSnapshotValid = true;
+                _paintLayoutFlatColor = displayedTexture.IsFlatColor;
+                _paintLayoutMirrorMode = _mirrorMode;
+                _paintLayoutDirectionFacing = _directionFacingOnly;
+                _paintLayoutEdgeStyle = _edgeStyle;
+            }
+            int nextTexture = GUILayout.SelectionGrid(previousTexture, names, 1);
+            if (nextTexture != previousTexture) _pendingTextureIndex = nextTexture;
+            if (GUILayout.Button("Browse / Add custom...")) OpenTextureBrowser();
+            // Selection changes are committed from Update. Draw the current panel until the next
+            // frame so Layout, input, and Repaint see the same control sequence.
+            if (_paintLayoutFlatColor) DrawFlatColorControls();
+            else DrawPatternScaleControls();
 
             GUILayout.Space(7f);
             GUILayout.Label("Side (part local)");
             DrawDirectionButtons();
             DrawFineDirectionControls();
-            _mirrorMode = GUILayout.SelectionGrid(Mathf.Clamp(_mirrorMode, 0, 1), MirrorModeLabels, 2);
-            if (_mirrorMode != 0)
+            int nextMirrorMode = GUILayout.SelectionGrid(Mathf.Clamp(_mirrorMode, 0, 1), MirrorModeLabels, 2);
+            if (nextMirrorMode != _mirrorMode) _pendingMirrorMode = nextMirrorMode;
+            if (_paintLayoutMirrorMode != 0)
             {
                 _mirrorAxis = GUILayout.SelectionGrid(Mathf.Clamp(_mirrorAxis, 0, 2), MirrorAxisLabels, 3);
             }
-            _directionFacingOnly = GUILayout.Toggle(_directionFacingOnly, new GUIContent(
+            bool nextDirectionFacing = GUILayout.Toggle(_directionFacingOnly, new GUIContent(
                 "Toggle surface wrap", "Limit paint to surfaces facing the selected side"));
-            if (_directionFacingOnly)
+            if (nextDirectionFacing != _directionFacingOnly)
+                _pendingDirectionFacing = nextDirectionFacing ? 1 : 0;
+            if (_paintLayoutDirectionFacing)
             {
                 GUILayout.Label("Surface wrap: " + _surfaceWrap.ToString("F0") + " degrees");
                 _surfaceWrap = GUILayout.HorizontalSlider(_surfaceWrap, 30f, 110f);
@@ -312,17 +375,22 @@ namespace HeatTileOverlayPrototype
 
             DrawPercentSlider("Coverage", ref _coverage, 0f, 100f, new[] { 0f, 25f, 50f, 100f });
             DrawPercentSlider("Opacity", ref _opacity, 0f, 100f, new[] { 25f, 50f, 75f, 100f });
-            _isolateOpacity = GUILayout.Toggle(_isolateOpacity, new GUIContent(
-                "Mask opacity", "Prevent overlapping translucent layers from multiplying opacity"));
+            bool opacityControlEnabled = GUI.enabled;
+            GUI.enabled = false;
+            GUILayout.Toggle(true, new GUIContent(
+                "Mask opacity", "Placed layers always mask lower layers. The legacy per-layer toggle is preserved but has no effect."));
+            GUI.enabled = opacityControlEnabled;
 
             GUILayout.Space(6f);
             GUILayout.Label("Edge style");
-            _edgeStyle = GUILayout.SelectionGrid(Mathf.Clamp(_edgeStyle, 0, 3), EdgeLabels, 2);
-            if (_edgeStyle != 0)
+            int nextEdgeStyle = GUILayout.SelectionGrid(Mathf.Clamp(_edgeStyle, 0, 3), EdgeLabels, 2);
+            if (nextEdgeStyle != _edgeStyle) _pendingEdgeStyle = nextEdgeStyle;
+            if (_paintLayoutEdgeStyle != 0)
             {
-                float maximumWidth = _edgeStyle == 1 ? 8f : (_edgeStyle == 2 ? 4f : 5f);
+                float maximumWidth = _paintLayoutEdgeStyle == 1 ? 8f
+                    : (_paintLayoutEdgeStyle == 2 ? 4f : 5f);
                 _edgeBlend = Mathf.Clamp(_edgeBlend, 0.25f, maximumWidth);
-                string widthName = _edgeStyle >= 2 ? "Border width" : "Fade width";
+                string widthName = "Fade width";
                 GUILayout.Label(widthName + ": " + _edgeBlend.ToString("F1") + "% of part depth");
                 _edgeBlend = GUILayout.HorizontalSlider(_edgeBlend, 0.25f, maximumWidth);
                 GUILayout.BeginHorizontal();
@@ -330,8 +398,9 @@ namespace HeatTileOverlayPrototype
                 if (GUILayout.Button("1.5%")) _edgeBlend = 1.5f;
                 if (GUILayout.Button(_edgeStyle == 1 ? "4%" : "3%")) _edgeBlend = _edgeStyle == 1 ? 4f : 3f;
                 GUILayout.EndHorizontal();
-                if (_directionFacingOnly && _surfaceWrap < 70f)
-                    GUILayout.Label("Borders may be clipped on a tight wrap; gasket/reinforced borders bridge the boundary only.");
+                GUILayout.Label(_paintLayoutEdgeStyle >= 2
+                    ? "Legacy border styles render as a soft fade."
+                    : " ");
             }
 
             GUILayout.Space(7f);
@@ -611,6 +680,219 @@ namespace HeatTileOverlayPrototype
             GUILayout.EndHorizontal();
         }
 
+        private void DrawPatternScaleControls()
+        {
+            _patternScale = Mathf.Clamp(_patternScale, 0.25f, 4f);
+            GUILayout.Space(4f);
+            GUILayout.Label("Pattern size: " + _patternScale.ToString("0.00", CultureInfo.InvariantCulture) + "x");
+            _patternScale = GUILayout.HorizontalSlider(_patternScale, 0.25f, 4f);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("0.5x")) _patternScale = 0.5f;
+            if (GUILayout.Button("1x")) _patternScale = 1f;
+            if (GUILayout.Button("2x")) _patternScale = 2f;
+            if (GUILayout.Button("4x")) _patternScale = 4f;
+            GUILayout.EndHorizontal();
+        }
+
+        private void OpenTextureBrowser()
+        {
+            StopDirectionGizmo();
+            _pendingTextureBrowserOpen = true;
+        }
+
+        private void DrawTextureBrowserWindow(int id)
+        {
+            GUILayout.Label("Choose a PNG or JPG. Heat Tile Painter copies it into its own user library.");
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("GameData", GUILayout.Width(90f)))
+                _pendingTextureBrowserDirectory = Path.Combine(KSPUtil.ApplicationRootPath, "GameData");
+            string pictures = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+            bool oldEnabled = GUI.enabled;
+            GUI.enabled = !string.IsNullOrEmpty(pictures) && Directory.Exists(pictures);
+            if (GUILayout.Button("Pictures", GUILayout.Width(90f))) _pendingTextureBrowserDirectory = pictures;
+            GUI.enabled = oldEnabled;
+            if (GUILayout.Button("Up", GUILayout.Width(70f)))
+            {
+                DirectoryInfo parent = string.IsNullOrEmpty(_textureBrowserDirectory)
+                    ? null : Directory.GetParent(_textureBrowserDirectory);
+                if (parent != null) _pendingTextureBrowserDirectory = parent.FullName;
+            }
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            _textureBrowserPathField = GUILayout.TextField(_textureBrowserPathField);
+            if (GUILayout.Button("Go", GUILayout.Width(54f))) NavigateTextureBrowserPath();
+            GUILayout.EndHorizontal();
+
+            _textureBrowserScroll = GUILayout.BeginScrollView(_textureBrowserScroll,
+                GUILayout.Height(Mathf.Max(220f, _textureBrowserWindow.height - 205f)));
+            for (int i = 0; i < _textureBrowserDirectories.Count; i++)
+            {
+                string directory = _textureBrowserDirectories[i];
+                if (GUILayout.Button("[Folder]  " + Path.GetFileName(directory)))
+                    _pendingTextureBrowserDirectory = directory;
+            }
+            for (int i = 0; i < _textureBrowserFiles.Count; i++)
+            {
+                string file = _textureBrowserFiles[i];
+                bool selected = string.Equals(file, _textureBrowserSelectedFile,
+                    StringComparison.OrdinalIgnoreCase);
+                bool next = GUILayout.Toggle(selected, Path.GetFileName(file), GUI.skin.button);
+                if (next && !selected) _textureBrowserSelectedFile = file;
+            }
+            GUILayout.EndScrollView();
+
+            GUILayout.Label(string.IsNullOrEmpty(_textureBrowserSelectedFile)
+                ? "No image selected." : "Selected: " + Path.GetFileName(_textureBrowserSelectedFile));
+            GUILayout.Label(string.IsNullOrEmpty(_textureBrowserError) ? " " : _textureBrowserError);
+            GUILayout.BeginHorizontal();
+            GUI.enabled = !string.IsNullOrEmpty(_textureBrowserSelectedFile)
+                && File.Exists(_textureBrowserSelectedFile);
+            if (GUILayout.Button("Add texture", GUILayout.Height(30f)))
+            {
+                _pendingTextureImport = _textureBrowserSelectedFile;
+                _textureBrowserOpen = false;
+            }
+            GUI.enabled = oldEnabled;
+            if (GUILayout.Button("Cancel", GUILayout.Height(30f))) _textureBrowserOpen = false;
+            GUILayout.EndHorizontal();
+            GUI.DragWindow(new Rect(0f, 0f, _textureBrowserWindow.width, 24f));
+        }
+
+        private void NavigateTextureBrowserPath()
+        {
+            try
+            {
+                string candidate = Path.GetFullPath(_textureBrowserPathField);
+                if (File.Exists(candidate) && HeatTileTextureLibrary.IsSupportedImagePath(candidate))
+                {
+                    _pendingTextureBrowserDirectory = Path.GetDirectoryName(candidate);
+                    _pendingTextureBrowserSelection = candidate;
+                    return;
+                }
+                _pendingTextureBrowserDirectory = candidate;
+            }
+            catch { _textureBrowserError = "That path could not be opened."; }
+        }
+
+        private void SetTextureBrowserDirectory(string directory)
+        {
+            try
+            {
+                string full = Path.GetFullPath(directory);
+                if (!Directory.Exists(full))
+                {
+                    _textureBrowserError = "That folder does not exist.";
+                    return;
+                }
+                _textureBrowserDirectory = full;
+                _textureBrowserPathField = full;
+                _textureBrowserSelectedFile = "";
+                _textureBrowserError = "";
+                RefreshTextureBrowserDirectory();
+            }
+            catch { _textureBrowserError = "That folder could not be opened."; }
+        }
+
+        private void RefreshTextureBrowserDirectory()
+        {
+            _textureBrowserDirectories.Clear();
+            _textureBrowserFiles.Clear();
+            try
+            {
+                string[] directories = Directory.GetDirectories(_textureBrowserDirectory);
+                Array.Sort(directories, StringComparer.OrdinalIgnoreCase);
+                _textureBrowserDirectories.AddRange(directories);
+                string[] files = Directory.GetFiles(_textureBrowserDirectory);
+                Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < files.Length; i++)
+                    if (HeatTileTextureLibrary.IsSupportedImagePath(files[i]))
+                        _textureBrowserFiles.Add(files[i]);
+            }
+            catch
+            {
+                _textureBrowserError = "KSP cannot read that folder.";
+            }
+            _textureBrowserScroll = Vector2.zero;
+        }
+
+        private void ProcessPendingTextureImport()
+        {
+            if (string.IsNullOrEmpty(_pendingTextureImport)) return;
+            string source = _pendingTextureImport;
+            _pendingTextureImport = "";
+            HeatTileTextureDefinition definition;
+            string error;
+            if (HeatTileTextureLibrary.TryImport(source, out definition, out error))
+            {
+                _textureIndex = HeatTileTextureLibrary.FindIndex(definition.Id);
+                _textureBrowserError = "";
+                ClearSurfacePreview();
+                ScreenMessages.PostScreenMessage("Added custom paint texture " + definition.DisplayName + ".",
+                    2f, ScreenMessageStyle.UPPER_CENTER);
+            }
+            else
+            {
+                _textureBrowserError = error;
+                _textureBrowserOpen = true;
+            }
+        }
+
+        private void ProcessPendingTextureSelection()
+        {
+            if (_pendingTextureIndex < 0) return;
+            IList<HeatTileTextureDefinition> definitions = HeatTileTextureLibrary.Definitions;
+            _textureIndex = Mathf.Clamp(_pendingTextureIndex, 0, definitions.Count - 1);
+            _pendingTextureIndex = -1;
+            if (definitions[_textureIndex].IsFlatColor)
+                _flatColor = definitions[_textureIndex].DefaultColor;
+            ClearSurfacePreview();
+        }
+
+        private void ProcessPendingConditionalSettings()
+        {
+            if (_pendingMirrorMode >= 0)
+            {
+                _mirrorMode = Mathf.Clamp(_pendingMirrorMode, 0, 1);
+                _pendingMirrorMode = -1;
+            }
+            if (_pendingDirectionFacing >= 0)
+            {
+                _directionFacingOnly = _pendingDirectionFacing != 0;
+                _pendingDirectionFacing = -1;
+            }
+            if (_pendingEdgeStyle >= 0)
+            {
+                _edgeStyle = Mathf.Clamp(_pendingEdgeStyle, 0, 3);
+                _pendingEdgeStyle = -1;
+            }
+        }
+
+        private void ProcessPendingTextureBrowserNavigation()
+        {
+            if (_pendingTextureBrowserOpen)
+            {
+                _pendingTextureBrowserOpen = false;
+                _textureBrowserOpen = true;
+                _textureBrowserError = "";
+                _textureBrowserWindow.x = Mathf.Max(8f, (Screen.width - _textureBrowserWindow.width) * 0.5f);
+                _textureBrowserWindow.y = Mathf.Max(8f, (Screen.height - _textureBrowserWindow.height) * 0.5f);
+                if (string.IsNullOrEmpty(_textureBrowserDirectory))
+                    SetTextureBrowserDirectory(Path.Combine(KSPUtil.ApplicationRootPath, "GameData"));
+                else RefreshTextureBrowserDirectory();
+            }
+            if (string.IsNullOrEmpty(_pendingTextureBrowserDirectory)) return;
+            string directory = _pendingTextureBrowserDirectory;
+            _pendingTextureBrowserDirectory = "";
+            SetTextureBrowserDirectory(directory);
+            if (!string.IsNullOrEmpty(_pendingTextureBrowserSelection))
+            {
+                _textureBrowserSelectedFile = _pendingTextureBrowserSelection;
+                _pendingTextureBrowserSelection = "";
+            }
+        }
+
         private void SetRgb(int red, int green, int blue)
         {
             _flatColor = new Color(red / 255f, green / 255f, blue / 255f, 1f);
@@ -675,9 +957,10 @@ namespace HeatTileOverlayPrototype
 
                 Rect thumbnailRect = new Rect(row.x + 30f, row.y + 4f, 52f, 36f);
                 DrawLayerThumbnail(thumbnailRect, layer);
-                string label = "L" + (index + 1) + "  " + HeatTileTextureLibrary.Find(layer.TextureId).DisplayName
+                string label = "L" + (index + 1) + "  " + HeatTileTextureLibrary.DisplayName(layer.TextureId)
                     + "\n" + DirectionSummary(layer) + "  " + layer.Coverage.ToString("F0") + "%  "
                     + EdgeLabels[Mathf.Clamp(layer.EdgeStyle, 0, 3)]
+                    + "  " + layer.PatternScale.ToString("0.##", CultureInfo.InvariantCulture) + "x"
                     + (layer.IsolateOpacity ? "  isolated" : "");
                 Rect labelRect = new Rect(row.x + 88f, row.y + 3f, row.width - 116f, 38f);
                 GUI.Label(labelRect, label);
@@ -731,11 +1014,11 @@ namespace HeatTileOverlayPrototype
                 if (nearestDragTarget >= 0) _dragTargetLayer = nearestDragTarget;
                 if (_draggingLayer && _dragTargetLayer >= 0 && _dragTargetLayer != _dragLayer && EditorLogic.fetch != null)
                 {
-                    EditorLogic.fetch.SetBackup();
+                    BeginPaintUndo();
                     if (module.MoveLayer(_dragLayer, _dragTargetLayer - _dragLayer))
                     {
                         _selectedLayer = _dragTargetLayer;
-                        GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                        EndPaintUndo();
                     }
                 }
                 _dragLayer = -1;
@@ -800,10 +1083,21 @@ namespace HeatTileOverlayPrototype
             GUILayout.Space(6f);
             bool enabled = module.ThermalProtectionEnabled;
             bool next = GUILayout.Toggle(enabled,
-                "Functional heat protection (+5% dry mass)");
+                "Functional heat protection");
             if (next != enabled) SetThermalProtection(module, next);
-            if (next)
-                GUILayout.Label("+35% internal / +50% skin limit, capped at 3000 K / 3300 K.");
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = wasEnabled && next;
+            float amount = module.ThermalProtectionAmount;
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Less", GUILayout.Width(52f))) SetThermalAmount(module, amount - 0.25f);
+            GUILayout.Label("Coating: " + amount.ToString("0.##") + "x");
+            if (GUILayout.Button("More", GUILayout.Width(52f))) SetThermalAmount(module, amount + 0.25f);
+            if (GUILayout.Button("1x", GUILayout.Width(36f))) SetThermalAmount(module, 1f);
+            GUILayout.EndHorizontal();
+            GUILayout.Label(string.Format("{0:0} K internal / {1:0} K skin; +{2:0.##}% dry mass",
+                module.ProtectedInternalLimit, module.ProtectedSkinLimit, module.ThermalMassPercent));
+            GUI.enabled = wasEnabled;
+            GUILayout.Label("0.25x–4x coating. Raises limits; does not consume ablator.");
         }
 
         private static GUIStyle LayerRowStyle(bool selected)
@@ -823,13 +1117,16 @@ namespace HeatTileOverlayPrototype
         {
             GUI.Box(rect, "");
             Rect imageRect = new Rect(rect.x + 2f, rect.y + 2f, rect.width - 4f, rect.height - 4f);
-            HeatTileTextureDefinition definition = HeatTileTextureLibrary.Find(layer.TextureId);
+            HeatTileTextureDefinition definition;
+            bool definitionFound = HeatTileTextureLibrary.FindExact(layer.TextureId, out definition);
             Color previousColor = GUI.color;
             Texture texture = Texture2D.whiteTexture;
-            if (definition.IsFlatColor) GUI.color = new Color(layer.Tint.r, layer.Tint.g, layer.Tint.b, 1f);
+            if (!definitionFound) GUI.color = new Color(0.3f, 0.08f, 0.08f, 1f);
+            else if (definition.IsFlatColor) GUI.color = new Color(layer.Tint.r, layer.Tint.g, layer.Tint.b, 1f);
             else
             {
-                Texture loaded = GameDatabase.Instance.GetTexture(definition.TexturePath, false);
+                Texture2D loaded;
+                HeatTileTextureLibrary.TryResolveTexture(definition.Id, false, out loaded);
                 if (loaded != null) texture = loaded;
             }
             GUI.DrawTexture(imageRect, texture, ScaleMode.ScaleAndCrop, false);
@@ -1026,10 +1323,11 @@ namespace HeatTileOverlayPrototype
             layer.MirrorMode = Mathf.Clamp(_mirrorMode, 0, 1);
             layer.MirrorAxis = Mathf.Clamp(_mirrorAxis, 0, 2);
             layer.PlaneOffset = _planeOffset;
-            if (createBackup) EditorLogic.fetch.SetBackup();
+            if (createBackup) BeginPaintUndo();
             if (module.UpdateLayer(_directionGizmoLayer, layer))
             {
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                if (createBackup) EndPaintUndo();
+                else GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
                 _directionGizmoPreviewDirty = true;
                 if (_placementGizmoMode == PlacementGizmoMode.Rotate)
                     RepositionDirectionGizmo(module, layer);
@@ -1124,8 +1422,7 @@ namespace HeatTileOverlayPrototype
                 CopyWholeStackToClipboard(clickedPart);
                 return;
             }
-
-            EditorLogic.fetch.SetBackup();
+            BeginPaintUndo();
             int changed = 0;
             if (_toolMode == ToolMode.Brush) changed = ApplyBrush(clickedPart);
             else if (_toolMode == ToolMode.Bucket) changed = ApplyBucket(clickedPart);
@@ -1134,7 +1431,7 @@ namespace HeatTileOverlayPrototype
             ClearSurfacePreview();
             if (changed > 0)
             {
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                EndPaintUndo();
                 string verb = _toolMode == ToolMode.Eraser ? "Removed paint from " : "Added paint to ";
                 ScreenMessages.PostScreenMessage(verb + changed + " part" + (changed == 1 ? "." : "s."),
                     1.5f, ScreenMessageStyle.UPPER_CENTER);
@@ -1324,7 +1621,8 @@ namespace HeatTileOverlayPrototype
                 MirrorMode = Mathf.Clamp(_mirrorMode, 0, 1),
                 MirrorAxis = _mirrorAxis,
                 IsolateOpacity = _isolateOpacity,
-                PlaneOffset = _planeOffset
+                PlaneOffset = _planeOffset,
+                PatternScale = _patternScale
             };
         }
 
@@ -1333,31 +1631,65 @@ namespace HeatTileOverlayPrototype
             StopDirectionGizmo();
             HeatTileLayerState layer = module.GetLayer(index);
             if (layer == null) return;
-            _textureIndex = HeatTileTextureLibrary.FindIndex(layer.TextureId);
+            _pendingTextureIndex = HeatTileTextureLibrary.FindIndex(layer.TextureId);
             _direction = layer.Direction;
             _fineDirection = ModuleHeatTileOverlay.CoverageDirection(layer);
             _coverage = layer.Coverage;
             _opacity = layer.Opacity;
             _edgeBlend = layer.EdgeBlend;
-            _edgeStyle = layer.EdgeStyle;
-            _directionFacingOnly = layer.DirectionFacingOnly;
+            _pendingEdgeStyle = layer.EdgeStyle;
+            _pendingDirectionFacing = layer.DirectionFacingOnly ? 1 : 0;
             _surfaceWrap = layer.SurfaceWrap;
             _flatColor = layer.Tint;
-            _mirrorMode = Mathf.Clamp(layer.MirrorMode, 0, 1);
+            _pendingMirrorMode = Mathf.Clamp(layer.MirrorMode, 0, 1);
             _mirrorAxis = layer.MirrorAxis;
             _isolateOpacity = layer.IsolateOpacity;
             _planeOffset = layer.PlaneOffset;
+            _patternScale = layer.PatternScale;
             ClearSurfacePreview();
+        }
+
+        private static System.Reflection.FieldInfo _invertedUndoField;
+        private static bool _undoCompatibilityChecked;
+
+        private static bool UsesInvertedUndo()
+        {
+            if (!_undoCompatibilityChecked)
+            {
+                _undoCompatibilityChecked = true;
+                foreach (AssemblyLoader.LoadedAssembly assembly in AssemblyLoader.loadedAssemblies)
+                {
+                    Type type = assembly.assembly.GetType("KSPCommunityFixes.QoL.BetterEditorUndoRedo", false);
+                    if (type == null) continue;
+                    _invertedUndoField = type.GetField("editorPatched",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                    break;
+                }
+            }
+            return _invertedUndoField != null && (bool)_invertedUndoField.GetValue(null);
+        }
+
+        private static void BeginPaintUndo()
+        {
+            // KSPCF captures before editing, then saves redo state when Undo is requested.
+            // Stock KSP captures after editing. Detect the applied patch, not just installation.
+            if (UsesInvertedUndo()) EditorLogic.fetch.SetBackup();
+        }
+
+        private static void EndPaintUndo()
+        {
+            if (UsesInvertedUndo()) GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+            else EditorLogic.fetch.SetBackup();
         }
 
         private void UpdateSelectedLayer(ModuleHeatTileOverlay module)
         {
             if (_selectedLayer < 0 || _selectedLayer >= module.LayerCount || EditorLogic.fetch == null) return;
             StopDirectionGizmo();
-            EditorLogic.fetch.SetBackup();
+            BeginPaintUndo();
             if (module.UpdateLayer(_selectedLayer, CurrentSettings()))
             {
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                EndPaintUndo();
                 ClearSurfacePreview();
             }
         }
@@ -1365,14 +1697,15 @@ namespace HeatTileOverlayPrototype
         private void ModifyLayerVisibility(ModuleHeatTileOverlay module, int index, bool visible)
         {
             if (EditorLogic.fetch == null) return;
-            EditorLogic.fetch.SetBackup();
-            if (module.SetLayerVisible(index, visible)) GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+            BeginPaintUndo();
+            if (module.SetLayerVisible(index, visible)) EndPaintUndo();
         }
 
         private void SetThermalProtection(ModuleHeatTileOverlay module, bool enabled)
         {
             if (module == null || module.part == null || EditorLogic.fetch == null) return;
-            EditorLogic.fetch.SetBackup();
+            if (module.ThermalProtectionEnabled == enabled && !_applySymmetry) return;
+            BeginPaintUndo();
             List<Part> targets = new List<Part>();
             targets.Add(module.part);
             if (_applySymmetry) targets.AddRange(module.part.symmetryCounterparts);
@@ -1385,7 +1718,26 @@ namespace HeatTileOverlayPrototype
                 ModuleHeatTileOverlay targetModule = GetOverlayModule(target);
                 if (targetModule != null && targetModule.SetThermalProtection(enabled)) changed = true;
             }
-            if (changed) GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+            if (changed) EndPaintUndo();
+        }
+
+        private void SetThermalAmount(ModuleHeatTileOverlay module, float amount)
+        {
+            if (module == null || module.part == null || EditorLogic.fetch == null) return;
+            amount = ThermalProtectionPolicy.Amount(amount);
+            if (module.ThermalProtectionAmount == amount) return;
+            BeginPaintUndo();
+            HashSet<Part> targets = new HashSet<Part>();
+            targets.Add(module.part);
+            if (_applySymmetry)
+                foreach (Part counterpart in module.part.symmetryCounterparts) targets.Add(counterpart);
+            bool changed = false;
+            foreach (Part target in targets)
+            {
+                ModuleHeatTileOverlay targetModule = GetOverlayModule(target);
+                if (targetModule != null && targetModule.SetThermalProtectionAmount(amount)) changed = true;
+            }
+            if (changed) EndPaintUndo();
         }
 
         private void ResetSelectedPlacement(ModuleHeatTileOverlay module)
@@ -1400,10 +1752,10 @@ namespace HeatTileOverlayPrototype
             _direction = layer.Direction;
             _fineDirection = layer.CustomDirection;
             _planeOffset = 0f;
-            EditorLogic.fetch.SetBackup();
+            BeginPaintUndo();
             if (module.UpdateLayer(_selectedLayer, layer))
             {
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                EndPaintUndo();
                 ClearSurfacePreview();
             }
         }
@@ -1411,11 +1763,11 @@ namespace HeatTileOverlayPrototype
         private void MoveSelectedLayer(ModuleHeatTileOverlay module, int delta)
         {
             if (EditorLogic.fetch == null) return;
-            EditorLogic.fetch.SetBackup();
+            BeginPaintUndo();
             if (module.MoveLayer(_selectedLayer, delta))
             {
                 _selectedLayer += delta;
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                EndPaintUndo();
             }
         }
 
@@ -1423,11 +1775,11 @@ namespace HeatTileOverlayPrototype
         {
             if (EditorLogic.fetch == null) return;
             StopDirectionGizmo();
-            EditorLogic.fetch.SetBackup();
+            BeginPaintUndo();
             if (module.RemoveLayer(_selectedLayer))
             {
                 _selectedLayer = Mathf.Min(_selectedLayer, module.LayerCount - 1);
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                EndPaintUndo();
                 ClearSurfacePreview();
             }
         }
@@ -1437,14 +1789,14 @@ namespace HeatTileOverlayPrototype
             StopDirectionGizmo();
             _confirmRemoveAll = false;
             if (EditorLogic.fetch == null || EditorLogic.fetch.ship == null) return;
-            EditorLogic.fetch.SetBackup();
+            BeginPaintUndo();
             int changed = 0;
             for (int i = 0; i < EditorLogic.fetch.ship.parts.Count; i++)
             {
                 ModuleHeatTileOverlay module = GetOverlayModule(EditorLogic.fetch.ship.parts[i]);
                 if (module != null && module.RemoveAllLayers()) changed++;
             }
-            if (changed > 0) GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+            if (changed > 0) EndPaintUndo();
             _selectedLayer = -1;
             ClearSurfacePreview();
             ScreenMessages.PostScreenMessage("Removed all heat-tile paint from " + changed + " part" + (changed == 1 ? "." : "s."),
@@ -1644,7 +1996,8 @@ namespace HeatTileOverlayPrototype
         private bool MouseInsideWindow()
         {
             Vector2 guiPosition = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
-            return _window.Contains(guiPosition);
+            return _window.Contains(guiPosition)
+                || (_textureBrowserOpen && _textureBrowserWindow.Contains(guiPosition));
         }
 
         private void UpdateWindowLock()

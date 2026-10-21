@@ -20,8 +20,8 @@ $coreSource = Get-Content -Raw -LiteralPath $corePath
 $painterSource = Get-Content -Raw -LiteralPath $painterPath
 $buildSource = Get-Content -Raw -LiteralPath $buildPath
 
-if ($painterSource -notmatch 'Heat Tile Painter 0\.24\.1') {
-    throw 'The editor window does not identify the 0.24.1 build.'
+if ($painterSource -notmatch 'Heat Tile Painter 0\.25\.0') {
+    throw 'The editor window does not identify the 0.25.0 build.'
 }
 if ($buildSource -match 'BakedPaintRenderer\.cs|FlatRegionPaintRenderer\.cs') {
     throw 'A retired persistent renderer is still present in the compiler source list.'
@@ -155,7 +155,7 @@ if ($null -eq $assembly.GetType('HeatTileOverlayPrototype.HeatTileOverlaySchedul
 }
 
 $version = $assembly.GetName().Version.ToString()
-if ($version -ne '0.24.1.0') { throw "Unexpected assembly version: $version" }
+if ($version -ne '0.25.0.0') { throw "Unexpected assembly version: $version" }
 
 Write-Output "Backend safety audit passed for Heat Tile Painter $version."
 Write-Output 'Persistent path: layerData -> atomic Reforged zones -> pristine restore.'

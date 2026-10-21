@@ -63,12 +63,18 @@ namespace HeatTileOverlayPrototype
         private static void AddReforgedZone(List<string> zones, HeatTileLayerState layer,
             Vector3 direction)
         {
-            HeatTileTextureDefinition definition = HeatTileTextureLibrary.Find(layer.TextureId);
+            HeatTileTextureDefinition definition;
+            if (!HeatTileTextureLibrary.FindExact(layer.TextureId, out definition))
+            {
+                HeatTileTextureLibrary.WarnMissing(layer.TextureId);
+                return;
+            }
             string texture = definition.IsFlatColor
                 ? "tint#" + HexColor(layer.Tint)
-                : TextureLeaf(definition.TexturePath);
+                : definition.Id;
             int opacity = Mathf.Clamp(Mathf.RoundToInt(layer.Opacity), 1, 100);
-            string stack = texture + ":whole:" + opacity.ToString(CultureInfo.InvariantCulture);
+            // Explicit percent encoding avoids upstream legacy levels 1..5 (60%/250%).
+            string stack = texture + ":whole:" + (1000 + opacity).ToString(CultureInfo.InvariantCulture);
 
             float coverage = Mathf.Clamp(layer.Coverage, 0f, 100f);
             // Values 1000..2000 are this fork's versioned tenths-of-a-percent encoding. The
@@ -86,7 +92,9 @@ namespace HeatTileOverlayPrototype
 
             // Reforged zone format:
             // region~finish~metal~smooth~colored~r~g~b~shineSpot~scale~weatherStack
-            zones.Add(region + "~0~0~0~0~1~1~1~0~1~" + stack);
+            zones.Add(region + "~0~0~0~0~1~1~1~0~"
+                + Mathf.Clamp(layer.PatternScale, 0.25f, 4f).ToString("R", CultureInfo.InvariantCulture)
+                + "~" + stack);
         }
 
         private static string VectorRegion(Vector3 direction, int cut, int fade,
@@ -105,13 +113,6 @@ namespace HeatTileOverlayPrototype
                 + "_" + (directionFacingOnly ? "1" : "0") + "_"
                 + Mathf.Clamp(Mathf.RoundToInt(surfaceWrap), 0, 180)
                     .ToString(CultureInfo.InvariantCulture);
-        }
-
-        private static string TextureLeaf(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return "hrsi_legacy";
-            int slash = path.LastIndexOf('/');
-            return slash >= 0 && slash + 1 < path.Length ? path.Substring(slash + 1) : path;
         }
 
         private static string HexColor(Color color)
